@@ -7,33 +7,36 @@ from config import DATABASE_PATH
 
 async def _migrate(db) -> None:
     """Add missing columns to existing tables (safe to run multiple times)."""
-    # Get existing columns in users table
+    # ── users columns ────────────────────────────────────────────────────────
     async with db.execute("PRAGMA table_info(users)") as cur:
         cols = {row[1] for row in await cur.fetchall()}
 
-    migrations = {
+    for col, sql in {
         "lang":           "ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'en'",
         "credits":        "ALTER TABLE users ADD COLUMN credits REAL DEFAULT 0.0",
         "referral_code":  "ALTER TABLE users ADD COLUMN referral_code TEXT",
         "referred_by":    "ALTER TABLE users ADD COLUMN referred_by INTEGER",
         "first_purchase": "ALTER TABLE users ADD COLUMN first_purchase INTEGER DEFAULT 0",
         "is_banned":      "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
-    }
-    for col, sql in migrations.items():
+    }.items():
         if col not in cols:
             await db.execute(sql)
 
-    # Orders table new columns
-    async with db.execute("PRAGMA table_info(orders)") as cur:
-        order_cols = {row[1] for row in await cur.fetchall()}
+    # ── orders columns (only if table exists) ────────────────────────────────
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='orders'"
+    ) as cur:
+        orders_exists = await cur.fetchone()
 
-    order_migrations = {
-        "item_type":    "ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT 'service'",
-        "credits_used": "ALTER TABLE orders ADD COLUMN credits_used REAL DEFAULT 0.0",
-    }
-    for col, sql in order_migrations.items():
-        if col not in order_cols:
-            await db.execute(sql)
+    if orders_exists:
+        async with db.execute("PRAGMA table_info(orders)") as cur:
+            order_cols = {row[1] for row in await cur.fetchall()}
+        for col, sql in {
+            "item_type":    "ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT 'service'",
+            "credits_used": "ALTER TABLE orders ADD COLUMN credits_used REAL DEFAULT 0.0",
+        }.items():
+            if col not in order_cols:
+                await db.execute(sql)
 
     await db.commit()
 
@@ -55,8 +58,6 @@ async def init_db() -> None:
                 is_banned       INTEGER DEFAULT 0
             )
         """)
-        # Run migrations for existing DBs
-        await _migrate(db)
         # Orders table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
@@ -89,6 +90,8 @@ async def init_db() -> None:
             )
         """)
         await db.commit()
+        # Run migrations AFTER all tables exist (adds missing columns to old DBs)
+        await _migrate(db)
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
