@@ -10,7 +10,8 @@ from strings import t
 from utils.keyboards import order_confirm_kb, back_to_orders_kb, main_menu_kb
 from utils.notifications import notify_admins_new_order, notify_order_status
 
-WAITING_PROOF = 1
+WAITING_PROOF     = 1
+WAITING_PAYER_ID  = 3   # asking for Binance Pay ID before showing instructions
 
 
 # ── Initiate payment (service) ─────────────────────────────────────────────────
@@ -30,57 +31,41 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     lang = await db.get_user_lang(query.from_user.id)
 
-    # ── Binance Pay (manual by ID) ─────────────────────────────────────────────
+    # ── Binance Pay — ask payer ID first ──────────────────────────────────────
     if network == "binance":
+        # Create a pending order without starting the monitor yet
         order_id = await db.create_order(
             query.from_user.id, service_id, svc["price"], "binance_pay")
 
+        # Store pending info in context so next handler can use it
+        context.user_data["bp_order_id"]   = order_id
+        context.user_data["bp_service_id"] = service_id
+        context.user_data["bp_lang"]       = lang
+        context.user_data["bp_item_type"]  = "service"
+
         if lang == "en":
-            warning = (
-                "⚠️ Make sure to send the <b>exact amount</b> and use <b>USDT</b>.\n"
-                "Include the order number in the note if possible."
-            )
-            id_label    = "Binance Pay ID"
-            amount_label = "Exact amount"
-            order_label  = "Order"
-            steps = (
-                "1️⃣ Open <b>Binance App</b>\n"
-                "2️⃣ Go to <b>Pay</b> → <b>Send</b>\n"
-                "3️⃣ Search by ID: <code>{bp_id}</code>\n"
-                "4️⃣ Enter amount: <b>${price} USDT</b>\n"
-                "5️⃣ Press the button below to send proof ✅"
+            msg = (
+                f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
+                f"💵 ${svc['price']:.2f} USDT\n\n"
+                "Before showing the payment address, please send us "
+                "<b>your Binance Pay ID</b> (the numeric ID of your account).\n\n"
+                "📍 <i>Find it in Binance App → Pay → My QR → your ID number below the QR</i>\n\n"
+                "Type /cancel to abort."
             )
         else:
-            warning = (
-                "⚠️ Asegúrate de enviar el <b>monto exacto</b> en <b>USDT</b>.\n"
-                "Incluye el número de pedido en la nota si es posible."
-            )
-            id_label    = "ID de Binance Pay"
-            amount_label = "Monto exacto"
-            order_label  = "Pedido"
-            steps = (
-                "1️⃣ Abre la <b>App de Binance</b>\n"
-                "2️⃣ Ve a <b>Pay</b> → <b>Enviar</b>\n"
-                "3️⃣ Busca por ID: <code>{bp_id}</code>\n"
-                "4️⃣ Ingresa el monto: <b>${price} USDT</b>\n"
-                "5️⃣ Presiona el botón abajo para enviar comprobante ✅"
+            msg = (
+                f"🟠 <b>Binance Pay — Paso 1 de 2</b>\n\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
+                f"💵 ${svc['price']:.2f} USDT\n\n"
+                "Antes de mostrarte la dirección de pago, envíanos "
+                "<b>tu ID de Binance Pay</b> (el número de tu cuenta).\n\n"
+                "📍 <i>Encuéntralo en Binance App → Pay → Mi QR → el número bajo el código QR</i>\n\n"
+                "Escribe /cancelar para cancelar."
             )
 
-        text = (
-            f"🟠 <b>Binance Pay</b>\n\n"
-            f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
-            f"💵 {amount_label}: <b>${svc['price']:.2f} USDT</b>\n"
-            f"🆔 {order_label}: <b>#{order_id}</b>\n\n"
-            f"📲 <b>{id_label}:</b>\n"
-            f"<code>{BINANCE_PAY_ID}</code>\n\n"
-            + steps.format(bp_id=BINANCE_PAY_ID, price=f"{svc['price']:.2f}") +
-            f"\n\n{warning}"
-        )
-        await query.edit_message_text(
-            text, parse_mode="HTML",
-            reply_markup=order_confirm_kb(order_id, lang)
-        )
-        return
+        await query.edit_message_text(msg, parse_mode="HTML")
+        return WAITING_PAYER_ID
 
     # ── TRC20 / BEP20 — auto-monitored ───────────────────────────────────────
     order_id = await db.create_order(
@@ -149,6 +134,116 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         lang=lang,
         timeout_seconds=3600,
     ))
+
+
+# ── Receive payer Binance ID and show payment instructions ────────────────────
+
+async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Conversation step: user sends their Binance Pay ID → show payment details."""
+    payer_id   = update.message.text.strip()
+    order_id   = context.user_data.get("bp_order_id")
+    service_id = context.user_data.get("bp_service_id")
+    lang       = context.user_data.get("bp_lang", "en")
+    item_type  = context.user_data.get("bp_item_type", "service")
+
+    if not order_id:
+        await update.message.reply_text("❌ Session expired. Please start again.")
+        return ConversationHandler.END
+
+    # Validate — must be at least 5 chars (Binance IDs are numeric, 6-12 digits)
+    if len(payer_id) < 5 or not any(c.isdigit() for c in payer_id):
+        lang_err = ("⚠️ That doesn't look like a valid Binance Pay ID. "
+                    "It should be a numeric ID (e.g. 123456789). Try again:"
+                    if lang == "en" else
+                    "⚠️ Eso no parece un ID de Binance Pay válido. "
+                    "Debe ser un número (ej. 123456789). Intenta de nuevo:")
+        await update.message.reply_text(lang_err, parse_mode="HTML")
+        return WAITING_PAYER_ID
+
+    # Get service/method info
+    from config import SERVICES, METHODS
+    item = SERVICES.get(service_id) or METHODS.get(service_id)
+    if not item:
+        await update.message.reply_text("❌ Service not found.")
+        return ConversationHandler.END
+
+    from payments.crypto_monitor import unique_amount
+    from payments.binance_monitor import monitor_binance_pay_payment
+
+    pay_amount = unique_amount(item["price"], order_id)
+
+    # Save payer ID and expected amount to DB
+    await db.set_order_payer(order_id, payer_id, pay_amount)
+
+    # Build Step 2 message
+    if lang == "en":
+        steps = (
+            "1️⃣ Open <b>Binance App</b>\n"
+            "2️⃣ Go to <b>Pay</b> → <b>Send</b>\n"
+            f"3️⃣ Search by Binance ID: <code>{BINANCE_PAY_ID}</code>\n"
+            f"4️⃣ Send EXACTLY: <b>${pay_amount:.2f} USDT</b>\n\n"
+            "🤖 <b>We'll detect your payment automatically!</b>"
+        )
+        order_label = "Order"
+        id_label    = "Your Binance Pay ID"
+    else:
+        steps = (
+            "1️⃣ Abre la <b>App de Binance</b>\n"
+            "2️⃣ Ve a <b>Pay</b> → <b>Enviar</b>\n"
+            f"3️⃣ Busca el ID: <code>{BINANCE_PAY_ID}</code>\n"
+            f"4️⃣ Envía EXACTAMENTE: <b>${pay_amount:.2f} USDT</b>\n\n"
+            "🤖 <b>¡Detectaremos tu pago automáticamente!</b>"
+        )
+        order_label = "Pedido"
+        id_label    = "Tu Binance Pay ID"
+
+    text = (
+        f"🟠 <b>Binance Pay — {'Step 2 of 2' if lang=='en' else 'Paso 2 de 2'}</b>\n\n"
+        f"✅ {id_label}: <code>{payer_id}</code>\n"
+        f"🆔 {order_label}: <b>#{order_id}</b>\n\n"
+        f"📲 <b>{'Send to' if lang=='en' else 'Envía a'} Binance Pay ID:</b>\n"
+        f"<code>{BINANCE_PAY_ID}</code>\n\n"
+        f"{steps}\n\n"
+        f"<i>({'unique amount to identify your transaction' if lang=='en' else 'monto único para identificar tu transacción'})</i>"
+    )
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup as IKM
+    kb = IKM([[
+        InlineKeyboardButton(
+            "📸 " + ("Send proof manually" if lang=="en" else "Enviar comprobante manual"),
+            callback_data=f"proof_{order_id}"
+        )
+    ], [
+        InlineKeyboardButton(t("btn_cancel", lang), callback_data=f"cancel_{order_id}")
+    ]])
+
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+    # Launch background monitor with payer ID
+    asyncio.create_task(monitor_binance_pay_payment(
+        bot=context.bot,
+        order_id=order_id,
+        expected_amount=pay_amount,
+        payer_binance_id=payer_id,
+        user_id=update.effective_user.id,
+        service_name=item["name"],
+        lang=lang,
+        timeout_seconds=3600,
+    ))
+
+    # Clear context
+    for k in ("bp_order_id", "bp_service_id", "bp_lang", "bp_item_type"):
+        context.user_data.pop(k, None)
+
+    return ConversationHandler.END
+
+
+async def cancel_binance_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    lang = context.user_data.pop("bp_lang", "en")
+    for k in ("bp_order_id", "bp_service_id", "bp_item_type"):
+        context.user_data.pop(k, None)
+    await update.message.reply_text(t("cancelled", lang), reply_markup=main_menu_kb(lang))
+    return ConversationHandler.END
 
 
 # ── Binance Pay auto-polling ───────────────────────────────────────────────────

@@ -23,7 +23,9 @@ from handlers.methods  import (show_methods, show_method_detail,
 from handlers.referrals import show_referrals
 from handlers.orders   import (
     initiate_payment, request_proof, receive_proof,
-    cancel_proof, my_orders, cancel_order, WAITING_PROOF,
+    cancel_proof, my_orders, cancel_order,
+    receive_payer_id, cancel_binance_id,
+    WAITING_PROOF, WAITING_PAYER_ID,
 )
 from handlers.admin    import (
     admin_panel, admin_stats, admin_pending_orders,
@@ -52,6 +54,27 @@ def build_application() -> Application:
     # ── /start & /admin ───────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+
+    # ── Conversation: Binance Pay payer ID collection ─────────────────────────
+    payer_id_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(initiate_payment,        pattern=r"^pay_binance_.+$"),
+            CallbackQueryHandler(initiate_method_payment, pattern=r"^mpay_binance_.+$"),
+        ],
+        states={
+            WAITING_PAYER_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payer_id),
+                CommandHandler("cancel",   cancel_binance_id),
+                CommandHandler("cancelar", cancel_binance_id),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel",   cancel_binance_id),
+            CommandHandler("cancelar", cancel_binance_id),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(payer_id_conv)
 
     # ── Conversation: payment proof ───────────────────────────────────────────
     proof_conv = ConversationHandler(
@@ -112,13 +135,13 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(show_catalog,           pattern=r"^catalog$"))
     app.add_handler(CallbackQueryHandler(show_service,           pattern=r"^service_.+$"))
     app.add_handler(CallbackQueryHandler(show_payment_methods,   pattern=r"^buy_.+$"))
-    app.add_handler(CallbackQueryHandler(initiate_payment,       pattern=r"^pay_(trc20|bep20|binance)_.+$"))
+    app.add_handler(CallbackQueryHandler(initiate_payment,       pattern=r"^pay_(trc20|bep20)_.+$"))
 
     # ── Methods ───────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_methods,            pattern=r"^methods$"))
     app.add_handler(CallbackQueryHandler(show_method_detail,      pattern=r"^method_.+$"))
     app.add_handler(CallbackQueryHandler(show_method_payment,     pattern=r"^mbuy_.+$"))
-    app.add_handler(CallbackQueryHandler(initiate_method_payment, pattern=r"^mpay_(trc20|bep20|binance)_.+$"))
+    app.add_handler(CallbackQueryHandler(initiate_method_payment, pattern=r"^mpay_(trc20|bep20)_.+$"))
 
     # ── Orders ────────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(my_orders,              pattern=r"^my_orders$"))

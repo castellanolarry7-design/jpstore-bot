@@ -2,11 +2,12 @@
 methods.py – Methods section handler
 """
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ContextTypes
+from telegram.ext import ContextTypes, ConversationHandler
 from config import METHODS, USDT_TRC20, USDT_BEP20, BINANCE_PAY_ENABLED, BINANCE_PAY_ID
 import database as db
 from strings import t
 from utils.notifications import notify_admins_new_order
+from handlers.orders import WAITING_PAYER_ID
 
 
 def _method_price_str(method: dict, lang: str) -> str:
@@ -128,7 +129,7 @@ async def initiate_method_payment(update: Update, context: ContextTypes.DEFAULT_
 
     lang = await db.get_user_lang(query.from_user.id)
 
-    # ── Binance Pay (manual by ID) ─────────────────────────────────────────────
+    # ── Binance Pay — ask payer ID first ──────────────────────────────────────
     if network == "binance":
         order_id = await db.create_order(
             user_id=query.from_user.id,
@@ -138,44 +139,33 @@ async def initiate_method_payment(update: Update, context: ContextTypes.DEFAULT_
             item_type="method",
         )
 
+        # Reuse the orders conversation — store in context
+        context.user_data["bp_order_id"]   = order_id
+        context.user_data["bp_service_id"] = method_id
+        context.user_data["bp_lang"]       = lang
+        context.user_data["bp_item_type"]  = "method"
+
         if lang == "en":
-            steps = (
-                "1️⃣ Open <b>Binance App</b>\n"
-                "2️⃣ Go to <b>Pay</b> → <b>Send</b>\n"
-                "3️⃣ Search by ID: <code>{bp_id}</code>\n"
-                "4️⃣ Enter amount: <b>${price} USDT</b>\n"
-                "5️⃣ Press the button below to send proof ✅"
+            msg = (
+                f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
+                f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
+                f"💵 ${method['price']:.2f} USDT\n\n"
+                "Please send us <b>your Binance Pay ID</b> first.\n\n"
+                "📍 <i>Binance App → Pay → My QR → the number below the QR code</i>\n\n"
+                "Type /cancel to abort."
             )
-            warning = "⚠️ Send the <b>exact amount</b> in <b>USDT</b>."
-            order_label = "Order"
         else:
-            steps = (
-                "1️⃣ Abre la <b>App de Binance</b>\n"
-                "2️⃣ Ve a <b>Pay</b> → <b>Enviar</b>\n"
-                "3️⃣ Busca por ID: <code>{bp_id}</code>\n"
-                "4️⃣ Ingresa el monto: <b>${price} USDT</b>\n"
-                "5️⃣ Presiona el botón abajo para enviar comprobante ✅"
+            msg = (
+                f"🟠 <b>Binance Pay — Paso 1 de 2</b>\n\n"
+                f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
+                f"💵 ${method['price']:.2f} USDT\n\n"
+                "Envíanos <b>tu ID de Binance Pay</b> primero.\n\n"
+                "📍 <i>Binance App → Pay → Mi QR → el número bajo el código QR</i>\n\n"
+                "Escribe /cancelar para cancelar."
             )
-            warning = "⚠️ Envía el <b>monto exacto</b> en <b>USDT</b>."
-            order_label = "Pedido"
 
-        text = (
-            f"🟠 <b>Binance Pay</b>\n\n"
-            f"{method['emoji']} <b>{method['name']}</b>\n"
-            f"💵 <b>${method['price']:.2f} USDT</b>\n"
-            f"🆔 {order_label}: <b>#{order_id}</b>\n\n"
-            f"📲 <b>Binance Pay ID:</b>\n"
-            f"<code>{BINANCE_PAY_ID}</code>\n\n"
-            + steps.format(bp_id=BINANCE_PAY_ID, price=f"{method['price']:.2f}") +
-            f"\n\n{warning}"
-        )
-
-        from utils.keyboards import order_confirm_kb
-        await query.edit_message_text(
-            text, parse_mode="HTML",
-            reply_markup=order_confirm_kb(order_id, lang)
-        )
-        return
+        await query.edit_message_text(msg, parse_mode="HTML")
+        return WAITING_PAYER_ID   # ConversationHandler in bot.py handles the next message
 
     # ── TRC20 / BEP20 ─────────────────────────────────────────────────────────
     order_id = await db.create_order(

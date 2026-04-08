@@ -32,8 +32,10 @@ async def _migrate(db) -> None:
         async with db.execute("PRAGMA table_info(orders)") as cur:
             order_cols = {row[1] for row in await cur.fetchall()}
         for col, sql in {
-            "item_type":    "ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT 'service'",
-            "credits_used": "ALTER TABLE orders ADD COLUMN credits_used REAL DEFAULT 0.0",
+            "item_type":         "ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT 'service'",
+            "credits_used":      "ALTER TABLE orders ADD COLUMN credits_used REAL DEFAULT 0.0",
+            "expected_amount":   "ALTER TABLE orders ADD COLUMN expected_amount REAL",
+            "payer_binance_id":  "ALTER TABLE orders ADD COLUMN payer_binance_id TEXT",
         }.items():
             if col not in order_cols:
                 await db.execute(sql)
@@ -61,19 +63,21 @@ async def init_db() -> None:
         # Orders table
         await db.execute("""
             CREATE TABLE IF NOT EXISTS orders (
-                order_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id         INTEGER NOT NULL,
-                service_id      TEXT    NOT NULL,
-                item_type       TEXT    DEFAULT 'service',  -- service | method
-                amount          REAL    NOT NULL,
-                credits_used    REAL    DEFAULT 0.0,
-                payment_method  TEXT    NOT NULL,
-                payment_proof   TEXT,
-                status          TEXT    DEFAULT 'pending',
-                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                delivery_info   TEXT,
-                admin_note      TEXT,
+                order_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id          INTEGER NOT NULL,
+                service_id       TEXT    NOT NULL,
+                item_type        TEXT    DEFAULT 'service',
+                amount           REAL    NOT NULL,
+                expected_amount  REAL,
+                credits_used     REAL    DEFAULT 0.0,
+                payment_method   TEXT    NOT NULL,
+                payment_proof    TEXT,
+                payer_binance_id TEXT,
+                status           TEXT    DEFAULT 'pending',
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                delivery_info    TEXT,
+                admin_note       TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
             )
         """)
@@ -179,6 +183,17 @@ async def create_order(user_id: int, service_id: str, amount: float,
         """, (user_id, service_id, item_type, amount, payment_method, credits_used))
         await db.commit()
         return cursor.lastrowid
+
+
+async def set_order_payer(order_id: int, payer_binance_id: str, expected_amount: float) -> None:
+    """Store the payer's Binance Pay ID and the unique expected amount."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            UPDATE orders
+            SET payer_binance_id = ?, expected_amount = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE order_id = ?
+        """, (payer_binance_id, expected_amount, order_id))
+        await db.commit()
 
 
 async def update_order_proof(order_id: int, proof: str) -> None:
