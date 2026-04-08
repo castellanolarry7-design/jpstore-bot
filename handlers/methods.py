@@ -195,18 +195,49 @@ async def initiate_method_payment(update: Update, context: ContextTypes.DEFAULT_
         net_name = "🟡 <b>USDT BEP20 (BSC)</b>"
         warning  = t("warning_bep20", lang)
 
-    text = t("payment_crypto", lang,
-             order_id=order_id,
-             emoji=method["emoji"],
-             name=method["name"],
-             price=f"{method['price']:.2f}",
-             network=net_name,
-             address=address,
-             warning=warning)
+    from payments.crypto_monitor import unique_amount, monitor_crypto_payment
+    import asyncio as _asyncio
+    pay_amount = unique_amount(method["price"], order_id)
 
-    from utils.keyboards import order_confirm_kb
-    await query.edit_message_text(text, parse_mode="HTML",
-                                   reply_markup=order_confirm_kb(order_id, lang))
+    if lang == "en":
+        auto_note  = "🤖 <b>Monitored automatically.</b> No screenshot needed!"
+        exact_label = "Send EXACTLY"
+    else:
+        auto_note  = "🤖 <b>Monitoreo automático.</b> ¡No necesitas enviar captura!"
+        exact_label = "Envía EXACTAMENTE"
+
+    text = (
+        f"📋 <b>{'Order' if lang=='en' else 'Pedido'} #{order_id}</b>\n\n"
+        f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
+        f"💳 {net_name}\n\n"
+        f"📤 <b>{'Address' if lang=='en' else 'Dirección'}:</b>\n"
+        f"<code>{address}</code>\n\n"
+        f"💵 <b>{exact_label}: <u>${pay_amount:.2f} USDT</u></b>\n"
+        f"<i>{'(unique amount)' if lang=='en' else '(monto único)'}</i>\n\n"
+        f"{warning}\n\n{auto_note}"
+    )
+
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "📸 " + ("Send proof manually" if lang=="en" else "Enviar comprobante manual"),
+            callback_data=f"proof_{order_id}"
+        )],
+        [InlineKeyboardButton(t("btn_cancel", lang), callback_data=f"cancel_{order_id}")],
+    ])
+
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+
+    _asyncio.create_task(monitor_crypto_payment(
+        bot=context.bot,
+        order_id=order_id,
+        network=network,
+        expected_amount=pay_amount,
+        user_id=query.from_user.id,
+        service_name=method["name"],
+        lang=lang,
+        timeout_seconds=3600,
+    ))
 
 
 async def _poll_method_binance(bot, user_id, order_id, prepay_id, method, lang):

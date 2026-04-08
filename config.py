@@ -12,6 +12,12 @@ BOT_USERNAME: str = os.getenv("BOT_USERNAME", "JPStoreBot")  # set via @BotFathe
 USDT_TRC20: str = os.getenv("USDT_TRC20_ADDRESS", "")
 USDT_BEP20: str = os.getenv("USDT_BEP20_ADDRESS", "")
 
+# ── Crypto monitoring APIs ────────────────────────────────
+# TronGrid (TRC20): https://www.trongrid.io  → free account → get API key
+TRONGRID_API_KEY: str  = os.getenv("TRONGRID_API_KEY", "")
+# BSCScan (BEP20):  https://bscscan.com/apis → free account → get API key
+BSCSCAN_API_KEY: str   = os.getenv("BSCSCAN_API_KEY", "")
+
 # ── Binance Pay ───────────────────────────────────────────
 BINANCE_PAY_ID: str     = os.getenv("BINANCE_PAY_ID", "800595536")  # Tu Binance ID
 BINANCE_API_KEY: str    = os.getenv("BINANCE_API_KEY", "")

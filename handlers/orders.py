@@ -82,27 +82,73 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
 
-    # ── TRC20 / BEP20 ─────────────────────────────────────────────────────────
+    # ── TRC20 / BEP20 — auto-monitored ───────────────────────────────────────
     order_id = await db.create_order(
         query.from_user.id, service_id, svc["price"], network)
+
+    # Generate unique amount to identify the payment on-chain
+    from payments.crypto_monitor import unique_amount, monitor_crypto_payment
+    pay_amount = unique_amount(svc["price"], order_id)
 
     if network == "trc20":
         address  = USDT_TRC20 or "⚠️ Not configured"
         net_name = "🔵 <b>USDT TRC20 (TRON)</b>"
-        warning  = t("warning_trc20", lang)
+        net_warn = t("warning_trc20", lang)
     else:
         address  = USDT_BEP20 or "⚠️ Not configured"
         net_name = "🟡 <b>USDT BEP20 (BSC)</b>"
-        warning  = t("warning_bep20", lang)
+        net_warn = t("warning_bep20", lang)
 
-    text = t("payment_crypto", lang,
-             order_id=order_id, emoji=svc["emoji"], name=svc["name"],
-             price=f"{svc['price']:.2f}", network=net_name,
-             address=address, warning=warning)
+    if lang == "en":
+        auto_note = (
+            "🤖 <b>Payment is monitored automatically.</b>\n"
+            "Once we detect your transfer, the order confirms itself — "
+            "no need to send a screenshot!"
+        )
+        exact_label = "Send EXACTLY"
+    else:
+        auto_note = (
+            "🤖 <b>El pago se monitorea automáticamente.</b>\n"
+            "Cuando detectemos tu transferencia, el pedido se confirma solo — "
+            "¡no necesitas enviar captura!"
+        )
+        exact_label = "Envía EXACTAMENTE"
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=order_confirm_kb(order_id, lang))
+    text = (
+        f"📋 <b>{'Order' if lang=='en' else 'Pedido'} #{order_id}</b>\n\n"
+        f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
+        f"💳 {net_name}\n\n"
+        f"📤 <b>{'Address' if lang=='en' else 'Dirección'}:</b>\n"
+        f"<code>{address}</code>\n\n"
+        f"💵 <b>{exact_label}: <u>${pay_amount:.2f} USDT</u></b>\n"
+        f"<i>{'(unique amount to identify your payment)' if lang=='en' else '(monto único para identificar tu pago)'}</i>\n\n"
+        f"{net_warn}\n\n"
+        f"{auto_note}"
+    )
+
+    # Keep manual proof button as fallback
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "📸 " + ("Send proof manually" if lang == "en" else "Enviar comprobante manual"),
+            callback_data=f"proof_{order_id}"
+        )],
+        [InlineKeyboardButton(t("btn_cancel", lang), callback_data=f"cancel_{order_id}")],
+    ])
+
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+
+    # Launch background blockchain monitor
+    asyncio.create_task(monitor_crypto_payment(
+        bot=context.bot,
+        order_id=order_id,
+        network=network,
+        expected_amount=pay_amount,
+        user_id=query.from_user.id,
+        service_name=svc["name"],
+        lang=lang,
+        timeout_seconds=3600,
+    ))
 
 
 # ── Binance Pay auto-polling ───────────────────────────────────────────────────
