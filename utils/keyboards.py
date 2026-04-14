@@ -63,8 +63,8 @@ def service_detail_kb(service_id: str, lang: str = "en", stock_qty: int = -1) ->
         )])
     elif stock_qty > 0:
         rows.append([InlineKeyboardButton(
-            "🛒 " + ("Select quantity" if lang == "en" else "Seleccionar cantidad"),
-            callback_data=f"qtysel_{service_id}"
+            "🛒 " + ("Buy now" if lang == "en" else "Comprar ahora"),
+            callback_data=f"buy_{service_id}"
         )])
     else:
         # No stock info — direct buy
