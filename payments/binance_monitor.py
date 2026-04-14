@@ -69,7 +69,7 @@ async def get_received_binance_pay(
     results = []
     for tx in data.get("data", []):
         # orderType PAY = received, C2C = sent — we only want received
-        if tx.get("orderType") not in ("PAY", "PAY_REFUND"):
+        if tx.get("orderType") not in ("PAY", "PAY_REFUND", "C2C"):
             continue
         try:
             # Get USDT amount from fundsDetail or top-level amount
