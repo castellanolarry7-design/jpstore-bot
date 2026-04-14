@@ -32,6 +32,8 @@ STRINGS: dict = {
     # ── MENU BUTTONS ─────────────────────────────────────────────────────────
     "btn_catalog":    {"en": "🛍️ Catalog",        "es": "🛍️ Catálogo"},
     "btn_methods":    {"en": "⚡ Methods",         "es": "⚡ Métodos"},
+    "btn_balance":    {"en": "💰 Balance",         "es": "💰 Balance"},
+    "btn_recargar":   {"en": "💳 Top Up",          "es": "💳 Recargar"},
     "btn_my_orders":  {"en": "📦 My Orders",       "es": "📦 Mis Pedidos"},
     "btn_referrals":  {"en": "🎁 Referrals",       "es": "🎁 Referidos"},
     "btn_support":    {"en": "💬 Support",         "es": "💬 Soporte"},

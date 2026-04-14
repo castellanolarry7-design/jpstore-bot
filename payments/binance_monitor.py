@@ -19,9 +19,10 @@ import time
 import urllib.parse
 import aiohttp
 
-BINANCE_BASE = "https://api.binance.com"
-POLL_INTERVAL = 30   # seconds between checks
-TOLERANCE = 0.005    # $0.005 tolerance for amount matching
+BINANCE_BASE    = "https://api.binance.com"
+POLL_INTERVAL   = 30     # seconds between checks
+TOLERANCE       = 0.005  # $0.005 tolerance for amount matching
+DEFAULT_TIMEOUT = 900    # 15 minutes
 
 
 def _sign(secret: str, params: dict) -> str:
@@ -50,15 +51,14 @@ async def get_received_binance_pay(
     url = f"{BINANCE_BASE}/sapi/v1/pay/transactions"
 
     try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url, params=params, headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    data = await resp.json()
-                    print(f"👀 RESPUESTA BRUTA DE BINANCE: {data}") # <-- El chismoso
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, params=params, headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json()
+                print(f"👀 RESPUESTA BRUTA DE BINANCE: {data}")
     except Exception as e:
-        
         print(f"[BinanceMonitor] Request error: {e}")
         return []
 
@@ -113,7 +113,7 @@ async def monitor_binance_pay_payment(
     service_name: str,
     lang: str,
     qty: int = 1,
-    timeout_seconds: int = 3600,
+    timeout_seconds: int = DEFAULT_TIMEOUT,
 ) -> None:
     """
     Background task: polls Binance Pay history every 30s until payment found or timeout.
@@ -153,18 +153,10 @@ async def monitor_binance_pay_payment(
             print(f"[BinanceMonitor] Fetch error: {e}")
             continue
 
-        # Match by BOTH payer ID and expected amount
+        # Match by amount (unique amount is sufficient for confirmation)
         for tx in transactions:
-            # Check payer identity — match against name or any ID field
-            tx_payer = str(tx.get("payer", "")).strip().lower()
-            payer_match = (
-                payer_id_normalized in tx_payer or
-                tx_payer in payer_id_normalized or
-                payer_id_normalized == tx_payer
-            )
             amount_match = abs(tx["amount"] - expected_amount) <= TOLERANCE
 
-       # Con que el monto único coincida, es suficiente para confirmar
             if amount_match:
                 tx_id = tx["transaction_id"]
                 print(f"[BinanceMonitor] ✅ Match por Monto! Order #{order_id} | TX: {tx_id}")
@@ -176,66 +168,70 @@ async def monitor_binance_pay_payment(
                                f"from: {tx['payer']}"
                 )
 
-                # Send payment confirmation to user
-                if lang == "en":
-                    confirm_msg = (
-                        f"✅ <b>Binance Pay confirmed!</b>\n\n"
-                        f"🆔 Order #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT | 🔖 <code>{tx_id}</code>"
-                    )
-                else:
-                    confirm_msg = (
-                        f"✅ <b>¡Binance Pay confirmado!</b>\n\n"
-                        f"🆔 Pedido #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT | 🔖 <code>{tx_id}</code>"
-                    )
-                try:
-                    await bot.send_message(chat_id=user_id, text=confirm_msg, parse_mode="HTML")
-                except Exception:
-                    pass
+                # ── Delete the payment instruction message ─────────────────
+                order = await db.get_order(order_id)
+                if order and order.get("instruction_msg_id"):
+                    try:
+                        await bot.delete_message(
+                            chat_id=order["instruction_chat_id"],
+                            message_id=order["instruction_msg_id"]
+                        )
+                    except Exception:
+                        pass
 
                 # ── Auto-deliver from stock ────────────────────────────────
                 from utils.delivery import auto_deliver
-                order      = await db.get_order(order_id)
-                service_id = order["service_id"]
-                await auto_deliver(bot, order_id, service_id, user_id, lang, qty=qty)
+                service_id      = order["service_id"]
+                stock_delivered = await auto_deliver(
+                    bot, order_id, service_id, user_id, lang, qty=qty)
 
-                # Notify admins
-                user = await db.get_user(user_id)
-                await notify_admins_new_order(bot, order, user)
+                # ── Only notify admin if manual delivery needed ─────────────
+                if not stock_delivered:
+                    user = await db.get_user(user_id)
+                    await notify_admins_new_order(bot, order, user)
+
+                # Topup orders → add credits to user balance
+                if order.get("item_type") == "topup":
+                    await db.add_credits(user_id, order["amount"])
 
                 # Referral credit
                 from handlers.referrals import handle_first_purchase_referral
                 await handle_first_purchase_referral(bot, user_id)
                 return
 
-    # Timeout — order stays pending, send fallback message
+    # Timeout — cancel order, delete instruction message, notify user
     order = await db.get_order(order_id)
     if order and order["status"] == "pending":
+        await db.update_order_status(order_id, "cancelled",
+                                     admin_note="Auto-cancelled: 15min timeout")
+
+        # Delete the payment instruction message
+        if order.get("instruction_msg_id"):
+            try:
+                await bot.delete_message(
+                    chat_id=order["instruction_chat_id"],
+                    message_id=order["instruction_msg_id"]
+                )
+            except Exception:
+                pass
+
         if lang == "en":
             msg = (
-                f"⏰ <b>Payment window expired</b>\n\n"
-                f"Order #{order_id} — we didn't detect a Binance Pay transfer in 1 hour.\n"
-                "If you already paid, tap below to send your screenshot. 💙"
+                f"⏰ <b>Order #{order_id} expired</b>\n\n"
+                "We didn't detect your Binance Pay transfer in 15 minutes. "
+                "The order was cancelled automatically.\n\n"
+                "If you already paid, contact support 💙"
             )
         else:
             msg = (
-                f"⏰ <b>Ventana de pago expirada</b>\n\n"
-                f"Pedido #{order_id} — no detectamos el pago de Binance Pay en 1 hora.\n"
-                "Si ya pagaste, envía tu captura de pantalla. 💙"
+                f"⏰ <b>Pedido #{order_id} vencido</b>\n\n"
+                "No detectamos tu Binance Pay en 15 minutos. "
+                "El pedido fue cancelado automáticamente.\n\n"
+                "Si ya pagaste, contacta soporte 💙"
             )
         try:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            await bot.send_message(
-                chat_id=user_id, text=msg, parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(
-                        "📸 Send proof" if lang == "en" else "📸 Enviar comprobante",
-                        callback_data=f"proof_{order_id}"
-                    )
-                ]])
-            )
+            await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
         except Exception:
             pass
 
-    print(f"[BinanceMonitor] Order #{order_id} timed out.")
+    print(f"[BinanceMonitor] Order #{order_id} timed out after {timeout_seconds}s.")

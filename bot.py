@@ -28,6 +28,12 @@ from handlers.orders   import (
     receive_payer_id, cancel_binance_id,
     WAITING_PROOF, WAITING_PAYER_ID,
 )
+from handlers.balance  import (
+    show_balance, show_recargar, recargar_amount,
+    initiate_topup_payment, initiate_topup_binance,
+    receive_topup_payer_id, cancel_topup,
+    WAITING_TOPUP_PAYER_ID,
+)
 from handlers.admin    import (
     # Auth
     admin_entry, admin_check_password,
@@ -163,6 +169,26 @@ def build_application() -> Application:
     )
     app.add_handler(deliver_conv)
 
+    # ── Top-Up Binance Pay payer ID flow ─────────────────────────────────────
+    topup_binance_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(initiate_topup_binance, pattern=r"^topup_pay_binance_\d+(\.\d+)?$"),
+        ],
+        states={
+            WAITING_TOPUP_PAYER_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topup_payer_id),
+                CommandHandler("cancel",   cancel_topup),
+                CommandHandler("cancelar", cancel_topup),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel",   cancel_topup),
+            CommandHandler("cancelar", cancel_topup),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(topup_binance_conv)
+
     # ── Broadcast ─────────────────────────────────────────────────────────────
     broadcast_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_broadcast_start,
@@ -217,6 +243,12 @@ def build_application() -> Application:
     # ── Orders ────────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(my_orders,              pattern=r"^my_orders$"))
     app.add_handler(CallbackQueryHandler(cancel_order,           pattern=r"^cancel_\d+$"))
+
+    # ── Balance / Top-Up ─────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(show_balance,            pattern=r"^balance$"))
+    app.add_handler(CallbackQueryHandler(show_recargar,           pattern=r"^recargar$"))
+    app.add_handler(CallbackQueryHandler(recargar_amount,         pattern=r"^topup_\d+$"))
+    app.add_handler(CallbackQueryHandler(initiate_topup_payment,  pattern=r"^topup_pay_(trc20|bep20)_\d+(\.\d+)?$"))
 
     # ── Referrals ─────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_referrals,         pattern=r"^referrals$"))

@@ -133,6 +133,13 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
+    # Save the instruction message ID so it can be deleted on payment/timeout
+    await db.save_instruction_message(
+        order_id,
+        chat_id=query.message.chat_id,
+        msg_id=query.message.message_id,
+    )
+
     # Launch background blockchain monitor
     asyncio.create_task(monitor_crypto_payment(
         bot=context.bot,
@@ -143,7 +150,7 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         service_name=svc["name"],
         lang=lang,
         qty=qty,
-        timeout_seconds=3600,
+        timeout_seconds=900,
     ))
 
 
@@ -229,7 +236,14 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         InlineKeyboardButton(t("btn_cancel", lang), callback_data=f"cancel_{order_id}")
     ]])
 
-    await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+    sent = await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+
+    # Save the instruction message ID so it can be deleted on payment/timeout
+    await db.save_instruction_message(
+        order_id,
+        chat_id=sent.chat_id,
+        msg_id=sent.message_id,
+    )
 
     # Launch background monitor with payer ID
     asyncio.create_task(monitor_binance_pay_payment(
@@ -241,7 +255,7 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         service_name=item["name"],
         lang=lang,
         qty=qty,
-        timeout_seconds=3600,
+        timeout_seconds=900,
     ))
 
     # Clear context

@@ -1,154 +1,314 @@
 """
-database.py – Async SQLite database management
+database.py – Dual-backend database layer
+  • PostgreSQL (asyncpg) when DATABASE_URL is set  ← production / Railway / Supabase
+  • SQLite (aiosqlite) as fallback for local dev
+
+All public functions are identical regardless of backend.
 """
-import aiosqlite
-from config import DATABASE_PATH
+import os, hashlib
+from config import DATABASE_URL, DATABASE_PATH
+
+# ── Backend detection ─────────────────────────────────────────────────────────
+_USE_PG = bool(DATABASE_URL)
+
+if _USE_PG:
+    import asyncpg
+    _pool: "asyncpg.Pool | None" = None
+
+    async def _get_pool() -> "asyncpg.Pool":
+        global _pool
+        if _pool is None:
+            url = DATABASE_URL
+            # Supabase/some providers give postgres://, asyncpg needs postgresql://
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
+            _pool = await asyncpg.create_pool(url, min_size=1, max_size=5,
+                                               statement_cache_size=0)
+        return _pool
+
+    async def _exec(query: str, *args):
+        async with (await _get_pool()).acquire() as c:
+            await c.execute(query, *args)
+
+    async def _fetch(query: str, *args) -> list[dict]:
+        async with (await _get_pool()).acquire() as c:
+            rows = await c.fetch(query, *args)
+            return [dict(r) for r in rows]
+
+    async def _fetchrow(query: str, *args) -> dict | None:
+        async with (await _get_pool()).acquire() as c:
+            row = await c.fetchrow(query, *args)
+            return dict(row) if row else None
+
+    async def _fetchval(query: str, *args):
+        async with (await _get_pool()).acquire() as c:
+            return await c.fetchval(query, *args)
+
+else:
+    import aiosqlite
+
+    def _q(sql: str) -> str:
+        """Convert $1,$2,… placeholders to ? for SQLite."""
+        import re
+        return re.sub(r'\$\d+', '?', sql)
+
+    async def _exec(query: str, *args):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await db.execute(_q(query), args)
+            await db.commit()
+
+    async def _fetch(query: str, *args) -> list[dict]:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(_q(query), args) as cur:
+                return [dict(r) for r in await cur.fetchall()]
+
+    async def _fetchrow(query: str, *args) -> dict | None:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(_q(query), args) as cur:
+                row = await cur.fetchone()
+                return dict(row) if row else None
+
+    async def _fetchval(query: str, *args):
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            async with db.execute(_q(query), args) as cur:
+                row = await cur.fetchone()
+                return row[0] if row else None
 
 
-async def _migrate(db) -> None:
-    """Add missing columns to existing tables (safe to run multiple times)."""
-    # ── users columns ────────────────────────────────────────────────────────
-    async with db.execute("PRAGMA table_info(users)") as cur:
-        cols = {row[1] for row in await cur.fetchall()}
+# ═════════════════════════════════════════════════════════════════════════════
+# SCHEMA CREATION & MIGRATION
+# ═════════════════════════════════════════════════════════════════════════════
 
-    for col, sql in {
-        "lang":           "ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'en'",
-        "credits":        "ALTER TABLE users ADD COLUMN credits REAL DEFAULT 0.0",
-        "referral_code":  "ALTER TABLE users ADD COLUMN referral_code TEXT",
-        "referred_by":    "ALTER TABLE users ADD COLUMN referred_by INTEGER",
-        "first_purchase": "ALTER TABLE users ADD COLUMN first_purchase INTEGER DEFAULT 0",
-        "is_banned":      "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
-    }.items():
-        if col not in cols:
-            await db.execute(sql)
+async def _create_tables_pg(conn) -> None:
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id         BIGINT PRIMARY KEY,
+            username        TEXT,
+            first_name      TEXT,
+            lang            TEXT    DEFAULT 'en',
+            credits         REAL    DEFAULT 0.0,
+            referral_code   TEXT,
+            referred_by     BIGINT,
+            first_purchase  INTEGER DEFAULT 0,
+            joined_at       TIMESTAMP DEFAULT NOW(),
+            is_banned       INTEGER DEFAULT 0
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id              SERIAL PRIMARY KEY,
+            user_id               BIGINT NOT NULL,
+            service_id            TEXT   NOT NULL,
+            item_type             TEXT   DEFAULT 'service',
+            amount                REAL   NOT NULL,
+            expected_amount       REAL,
+            credits_used          REAL   DEFAULT 0.0,
+            payment_method        TEXT   NOT NULL,
+            payment_proof         TEXT,
+            payer_binance_id      TEXT,
+            status                TEXT   DEFAULT 'pending',
+            created_at            TIMESTAMP DEFAULT NOW(),
+            updated_at            TIMESTAMP DEFAULT NOW(),
+            delivery_info         TEXT,
+            admin_note            TEXT,
+            instruction_msg_id    BIGINT,
+            instruction_chat_id   BIGINT,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id          SERIAL PRIMARY KEY,
+            referrer_id BIGINT NOT NULL,
+            referred_id BIGINT NOT NULL,
+            credited    INTEGER DEFAULT 0,
+            created_at  TIMESTAMP DEFAULT NOW(),
+            UNIQUE(referrer_id, referred_id)
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS stock (
+            id           SERIAL PRIMARY KEY,
+            service_id   TEXT    NOT NULL,
+            content      TEXT    NOT NULL,
+            label        TEXT,
+            delivered    INTEGER DEFAULT 0,
+            order_id     INTEGER,
+            delivered_at TIMESTAMP,
+            added_at     TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    # Safe ALTER TABLE ADD COLUMN IF NOT EXISTS (PG 9.6+)
+    for tbl, col, typedef in [
+        ("users",  "credits",              "REAL DEFAULT 0.0"),
+        ("users",  "referral_code",        "TEXT"),
+        ("users",  "referred_by",          "BIGINT"),
+        ("users",  "first_purchase",       "INTEGER DEFAULT 0"),
+        ("users",  "is_banned",            "INTEGER DEFAULT 0"),
+        ("orders", "item_type",            "TEXT DEFAULT 'service'"),
+        ("orders", "credits_used",         "REAL DEFAULT 0.0"),
+        ("orders", "expected_amount",      "REAL"),
+        ("orders", "payer_binance_id",     "TEXT"),
+        ("orders", "instruction_msg_id",   "BIGINT"),
+        ("orders", "instruction_chat_id",  "BIGINT"),
+        ("stock",  "label",                "TEXT"),
+    ]:
+        try:
+            await conn.execute(
+                f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col} {typedef}"
+            )
+        except Exception:
+            pass
 
-    # ── orders columns (only if table exists) ────────────────────────────────
-    async with db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='orders'"
-    ) as cur:
-        orders_exists = await cur.fetchone()
 
-    if orders_exists:
-        async with db.execute("PRAGMA table_info(orders)") as cur:
-            order_cols = {row[1] for row in await cur.fetchall()}
-        for col, sql in {
-            "item_type":         "ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT 'service'",
-            "credits_used":      "ALTER TABLE orders ADD COLUMN credits_used REAL DEFAULT 0.0",
-            "expected_amount":   "ALTER TABLE orders ADD COLUMN expected_amount REAL",
-            "payer_binance_id":  "ALTER TABLE orders ADD COLUMN payer_binance_id TEXT",
-        }.items():
-            if col not in order_cols:
-                await db.execute(sql)
-
-    # ── stock columns (only if table exists) ─────────────────────────────────
-    async with db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='stock'"
-    ) as cur:
-        stock_exists = await cur.fetchone()
-
-    if stock_exists:
-        async with db.execute("PRAGMA table_info(stock)") as cur:
-            stock_cols = {row[1] for row in await cur.fetchall()}
-        for col, sql in {
+async def _create_tables_sqlite(db) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id         INTEGER PRIMARY KEY,
+            username        TEXT,
+            first_name      TEXT,
+            lang            TEXT    DEFAULT 'en',
+            credits         REAL    DEFAULT 0.0,
+            referral_code   TEXT,
+            referred_by     INTEGER,
+            first_purchase  INTEGER DEFAULT 0,
+            joined_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_banned       INTEGER DEFAULT 0
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id               INTEGER NOT NULL,
+            service_id            TEXT    NOT NULL,
+            item_type             TEXT    DEFAULT 'service',
+            amount                REAL    NOT NULL,
+            expected_amount       REAL,
+            credits_used          REAL    DEFAULT 0.0,
+            payment_method        TEXT    NOT NULL,
+            payment_proof         TEXT,
+            payer_binance_id      TEXT,
+            status                TEXT    DEFAULT 'pending',
+            created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            delivery_info         TEXT,
+            admin_note            TEXT,
+            instruction_msg_id    INTEGER,
+            instruction_chat_id   INTEGER,
+            FOREIGN KEY(user_id) REFERENCES users(user_id)
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            referrer_id INTEGER NOT NULL,
+            referred_id INTEGER NOT NULL,
+            credited    INTEGER DEFAULT 0,
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(referrer_id, referred_id)
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS stock (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id   TEXT    NOT NULL,
+            content      TEXT    NOT NULL,
+            label        TEXT,
+            delivered    INTEGER DEFAULT 0,
+            order_id     INTEGER,
+            delivered_at TIMESTAMP,
+            added_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.commit()
+    # Safe migrations for existing SQLite DBs
+    for tbl, existing_cols_query, col_defs in [
+        ("users",  "PRAGMA table_info(users)",  {
+            "lang": "ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'en'",
+            "credits": "ALTER TABLE users ADD COLUMN credits REAL DEFAULT 0.0",
+            "referral_code": "ALTER TABLE users ADD COLUMN referral_code TEXT",
+            "referred_by": "ALTER TABLE users ADD COLUMN referred_by INTEGER",
+            "first_purchase": "ALTER TABLE users ADD COLUMN first_purchase INTEGER DEFAULT 0",
+            "is_banned": "ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0",
+        }),
+        ("orders", "PRAGMA table_info(orders)", {
+            "item_type": "ALTER TABLE orders ADD COLUMN item_type TEXT DEFAULT 'service'",
+            "credits_used": "ALTER TABLE orders ADD COLUMN credits_used REAL DEFAULT 0.0",
+            "expected_amount": "ALTER TABLE orders ADD COLUMN expected_amount REAL",
+            "payer_binance_id": "ALTER TABLE orders ADD COLUMN payer_binance_id TEXT",
+            "instruction_msg_id": "ALTER TABLE orders ADD COLUMN instruction_msg_id INTEGER",
+            "instruction_chat_id": "ALTER TABLE orders ADD COLUMN instruction_chat_id INTEGER",
+        }),
+        ("stock", "PRAGMA table_info(stock)", {
             "label": "ALTER TABLE stock ADD COLUMN label TEXT",
-        }.items():
-            if col not in stock_cols:
+        }),
+    ]:
+        async with db.execute(existing_cols_query) as cur:
+            cols = {row[1] for row in await cur.fetchall()}
+        for col, sql in col_defs.items():
+            if col not in cols:
                 await db.execute(sql)
-
     await db.commit()
 
 
 async def init_db() -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Users table — now with lang, credits, referral_code, referred_by
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id         INTEGER PRIMARY KEY,
-                username        TEXT,
-                first_name      TEXT,
-                lang            TEXT    DEFAULT 'en',
-                credits         REAL    DEFAULT 0.0,
-                referral_code   TEXT,
-                referred_by     INTEGER,
-                first_purchase  INTEGER DEFAULT 0,
-                joined_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                is_banned       INTEGER DEFAULT 0
-            )
-        """)
-        # Orders table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id          INTEGER NOT NULL,
-                service_id       TEXT    NOT NULL,
-                item_type        TEXT    DEFAULT 'service',
-                amount           REAL    NOT NULL,
-                expected_amount  REAL,
-                credits_used     REAL    DEFAULT 0.0,
-                payment_method   TEXT    NOT NULL,
-                payment_proof    TEXT,
-                payer_binance_id TEXT,
-                status           TEXT    DEFAULT 'pending',
-                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                delivery_info    TEXT,
-                admin_note       TEXT,
-                FOREIGN KEY(user_id) REFERENCES users(user_id)
-            )
-        """)
-        # Stock table — one row per deliverable item
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS stock (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                service_id   TEXT    NOT NULL,
-                content      TEXT    NOT NULL,
-                label        TEXT,
-                delivered    INTEGER DEFAULT 0,
-                order_id     INTEGER,
-                delivered_at TIMESTAMP,
-                added_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Referrals table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                referrer_id     INTEGER NOT NULL,
-                referred_id     INTEGER NOT NULL,
-                credited        INTEGER DEFAULT 0,
-                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(referrer_id) REFERENCES users(user_id),
-                FOREIGN KEY(referred_id) REFERENCES users(user_id)
-            )
-        """)
-        await db.commit()
-        # Run migrations AFTER all tables exist (adds missing columns to old DBs)
-        await _migrate(db)
+    if _USE_PG:
+        async with (await _get_pool()).acquire() as conn:
+            await _create_tables_pg(conn)
+    else:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            await _create_tables_sqlite(db)
 
 
-# ── Users ─────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# INSERT HELPER (handles RETURNING for PG vs lastrowid for SQLite)
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def _insert_returning(query: str, *args) -> int:
+    """Execute an INSERT and return the generated ID."""
+    if _USE_PG:
+        # query must end with RETURNING <id_col>
+        async with (await _get_pool()).acquire() as c:
+            return await c.fetchval(query, *args)
+    else:
+        import re
+        # Strip RETURNING clause for SQLite, use lastrowid
+        sql = re.sub(r'\s+RETURNING\s+\w+\s*$', '', query, flags=re.IGNORECASE)
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cur = await db.execute(re.sub(r'\$\d+', '?', sql), args)
+            await db.commit()
+            return cur.lastrowid
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# USERS
+# ═════════════════════════════════════════════════════════════════════════════
 
 async def upsert_user(user_id: int, username: str | None, first_name: str,
                       referred_by: int | None = None) -> None:
-    import hashlib
     code = hashlib.md5(str(user_id).encode()).hexdigest()[:8].upper()
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("""
+    if _USE_PG:
+        await _exec("""
             INSERT INTO users (user_id, username, first_name, referral_code, referred_by)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username   = EXCLUDED.username,
+                first_name = EXCLUDED.first_name
+        """, user_id, username, first_name, code, referred_by)
+    else:
+        await _exec("""
+            INSERT INTO users (user_id, username, first_name, referral_code, referred_by)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT(user_id) DO UPDATE SET
                 username   = excluded.username,
                 first_name = excluded.first_name
-        """, (user_id, username, first_name, code, referred_by))
-        await db.commit()
+        """, user_id, username, first_name, code, referred_by)
 
 
 async def get_user(user_id: int) -> dict | None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+    return await _fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
 
 
 async def get_user_lang(user_id: int) -> str:
@@ -157,361 +317,254 @@ async def get_user_lang(user_id: int) -> str:
 
 
 async def set_user_lang(user_id: int, lang: str) -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id))
-        await db.commit()
+    await _exec("UPDATE users SET lang = $1 WHERE user_id = $2", lang, user_id)
 
 
 async def get_all_users() -> list[dict]:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users ORDER BY joined_at DESC") as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    return await _fetch("SELECT * FROM users ORDER BY joined_at DESC")
 
 
 async def add_credits(user_id: int, amount: float) -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute(
-            "UPDATE users SET credits = credits + ? WHERE user_id = ?", (amount, user_id))
-        await db.commit()
+    await _exec("UPDATE users SET credits = credits + $1 WHERE user_id = $2", amount, user_id)
 
 
 async def use_credits(user_id: int, amount: float) -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute(
-            "UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?", (amount, user_id))
-        await db.commit()
+    await _exec(
+        "UPDATE users SET credits = GREATEST(0, credits - $1) WHERE user_id = $2"
+        if _USE_PG else
+        "UPDATE users SET credits = MAX(0, credits - $1) WHERE user_id = $2",
+        amount, user_id)
 
 
 async def mark_first_purchase(user_id: int) -> int | None:
-    """Marks first purchase and returns the referrer_id if one exists."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT first_purchase, referred_by FROM users WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row or row["first_purchase"]:
-            return None  # already marked
-        await db.execute(
-            "UPDATE users SET first_purchase = 1 WHERE user_id = ?", (user_id,))
-        await db.commit()
-        return row["referred_by"]
+    row = await _fetchrow(
+        "SELECT first_purchase, referred_by FROM users WHERE user_id = $1", user_id)
+    if not row or row["first_purchase"]:
+        return None
+    await _exec("UPDATE users SET first_purchase = 1 WHERE user_id = $1", user_id)
+    return row["referred_by"]
 
 
-# ── Orders ────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# ORDERS
+# ═════════════════════════════════════════════════════════════════════════════
 
 async def create_order(user_id: int, service_id: str, amount: float,
                        payment_method: str, item_type: str = "service",
                        credits_used: float = 0.0) -> int:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        cursor = await db.execute("""
-            INSERT INTO orders (user_id, service_id, item_type, amount, payment_method, credits_used)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (user_id, service_id, item_type, amount, payment_method, credits_used))
-        await db.commit()
-        return cursor.lastrowid
+    return await _insert_returning("""
+        INSERT INTO orders (user_id, service_id, item_type, amount, payment_method, credits_used)
+        VALUES ($1, $2, $3, $4, $5, $6) RETURNING order_id
+    """, user_id, service_id, item_type, amount, payment_method, credits_used)
 
 
-async def set_order_payer(order_id: int, payer_binance_id: str, expected_amount: float) -> None:
-    """Store the payer's Binance Pay ID and the unique expected amount."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("""
-            UPDATE orders
-            SET payer_binance_id = ?, expected_amount = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE order_id = ?
-        """, (payer_binance_id, expected_amount, order_id))
-        await db.commit()
+async def save_instruction_message(order_id: int, chat_id: int, msg_id: int) -> None:
+    """Store the payment instruction message so it can be deleted after confirmation."""
+    await _exec("""
+        UPDATE orders SET instruction_chat_id = $1, instruction_msg_id = $2
+        WHERE order_id = $3
+    """, chat_id, msg_id, order_id)
+
+
+async def set_order_payer(order_id: int, payer_binance_id: str,
+                          expected_amount: float) -> None:
+    await _exec("""
+        UPDATE orders
+        SET payer_binance_id = $1, expected_amount = $2
+        WHERE order_id = $3
+    """, payer_binance_id, expected_amount, order_id)
 
 
 async def update_order_proof(order_id: int, proof: str) -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("""
-            UPDATE orders SET payment_proof = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE order_id = ?
-        """, (proof, order_id))
-        await db.commit()
+    await _exec("""
+        UPDATE orders SET payment_proof = $1 WHERE order_id = $2
+    """, proof, order_id)
 
 
 async def update_order_status(order_id: int, status: str,
-                               admin_note: str = None, delivery_info: str = None) -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("""
-            UPDATE orders
-            SET status = ?,
-                admin_note    = COALESCE(?, admin_note),
-                delivery_info = COALESCE(?, delivery_info),
-                updated_at    = CURRENT_TIMESTAMP
-            WHERE order_id = ?
-        """, (status, admin_note, delivery_info, order_id))
-        await db.commit()
+                               admin_note: str = None,
+                               delivery_info: str = None) -> None:
+    await _exec("""
+        UPDATE orders
+        SET status        = $1,
+            admin_note    = COALESCE($2, admin_note),
+            delivery_info = COALESCE($3, delivery_info)
+        WHERE order_id = $4
+    """, status, admin_note, delivery_info, order_id)
 
 
 async def get_order(order_id: int) -> dict | None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+    return await _fetchrow("SELECT * FROM orders WHERE order_id = $1", order_id)
 
 
 async def get_user_orders(user_id: int) -> list[dict]:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC", (user_id,)
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    return await _fetch(
+        "SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC", user_id)
 
 
 async def get_pending_orders() -> list[dict]:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT o.*, u.username, u.first_name
-            FROM orders o JOIN users u ON o.user_id = u.user_id
-            WHERE o.status = 'pending' ORDER BY o.created_at ASC
-        """) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
-
-async def get_all_orders(limit: int = 50) -> list[dict]:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT o.*, u.username, u.first_name
-            FROM orders o JOIN users u ON o.user_id = u.user_id
-            ORDER BY o.created_at DESC LIMIT ?
-        """, (limit,)) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    return await _fetch("""
+        SELECT o.*, u.username, u.first_name
+        FROM orders o JOIN users u ON o.user_id = u.user_id
+        WHERE o.status = 'pending' ORDER BY o.created_at ASC
+    """)
 
 
 async def get_stats() -> dict:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        stats = {}
-        for key, query in [
-            ("total_users",      "SELECT COUNT(*) FROM users"),
-            ("total_orders",     "SELECT COUNT(*) FROM orders"),
-            ("pending_orders",   "SELECT COUNT(*) FROM orders WHERE status='pending'"),
-            ("delivered_orders", "SELECT COUNT(*) FROM orders WHERE status='delivered'"),
-            ("total_referrals",  "SELECT COUNT(*) FROM referrals"),
-        ]:
-            async with db.execute(query) as cur:
-                stats[key] = (await cur.fetchone())[0]
-        async with db.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered'"
-        ) as cur:
-            stats["total_revenue"] = (await cur.fetchone())[0]
-        return stats
+    stats = {}
+    for key, q in [
+        ("total_users",      "SELECT COUNT(*) FROM users"),
+        ("total_orders",     "SELECT COUNT(*) FROM orders WHERE item_type != 'topup'"),
+        ("pending_orders",   "SELECT COUNT(*) FROM orders WHERE status='pending' AND item_type!='topup'"),
+        ("delivered_orders", "SELECT COUNT(*) FROM orders WHERE status='delivered'"),
+        ("total_referrals",  "SELECT COUNT(*) FROM referrals"),
+    ]:
+        stats[key] = await _fetchval(q) or 0
+    stats["total_revenue"] = await _fetchval(
+        "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' AND item_type!='topup'"
+    ) or 0.0
+    return stats
 
 
-# ── Referrals ─────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# REFERRALS
+# ═════════════════════════════════════════════════════════════════════════════
 
 async def get_user_by_referral_code(code: str) -> dict | None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM users WHERE referral_code = ?", (code,)
-        ) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+    return await _fetchrow("SELECT * FROM users WHERE referral_code = $1", code)
 
 
 async def record_referral(referrer_id: int, referred_id: int) -> None:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute("""
-            INSERT OR IGNORE INTO referrals (referrer_id, referred_id)
-            VALUES (?, ?)
-        """, (referrer_id, referred_id))
-        await db.commit()
+    if _USE_PG:
+        await _exec("""
+            INSERT INTO referrals (referrer_id, referred_id)
+            VALUES ($1, $2) ON CONFLICT DO NOTHING
+        """, referrer_id, referred_id)
+    else:
+        await _exec("""
+            INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES ($1, $2)
+        """, referrer_id, referred_id)
 
 
 async def credit_referral(referrer_id: int, referred_id: int) -> bool:
-    """Credit the referrer $1 — only once per referred user. Returns True if credited."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT credited FROM referrals WHERE referrer_id=? AND referred_id=?",
-            (referrer_id, referred_id)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row or row[0]:
-            return False
-        await db.execute(
-            "UPDATE referrals SET credited = 1 WHERE referrer_id=? AND referred_id=?",
-            (referrer_id, referred_id)
-        )
-        await db.execute(
-            "UPDATE users SET credits = credits + 1.0 WHERE user_id = ?", (referrer_id,))
-        await db.commit()
-        return True
+    row = await _fetchrow(
+        "SELECT credited FROM referrals WHERE referrer_id=$1 AND referred_id=$2",
+        referrer_id, referred_id)
+    if not row or row["credited"]:
+        return False
+    await _exec("UPDATE referrals SET credited=1 WHERE referrer_id=$1 AND referred_id=$2",
+                referrer_id, referred_id)
+    await _exec("UPDATE users SET credits = credits + 1.0 WHERE user_id=$1", referrer_id)
+    return True
 
 
 async def get_referral_count(user_id: int) -> int:
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,)
-        ) as cur:
-            return (await cur.fetchone())[0]
+    return (await _fetchval(
+        "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", user_id)) or 0
 
 
-# ── Stock ─────────────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# STOCK
+# ═════════════════════════════════════════════════════════════════════════════
 
-async def add_stock_items(service_id: str, items: list[str], label: str = None) -> int:
-    """Insert multiple stock items. Returns count added."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        count = 0
-        for content in items:
-            content = content.strip()
-            if content:
-                await db.execute(
-                    "INSERT INTO stock (service_id, content, label) VALUES (?, ?, ?)",
-                    (service_id, content, label)
-                )
-                count += 1
-        await db.commit()
-        return count
-
-
-async def take_stock_item(service_id: str, order_id: int) -> dict | None:
-    """
-    Atomically grab one undelivered item for the service and mark it delivered.
-    Returns the item dict or None if stock is empty.
-    """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        # Pick the oldest available item
-        async with db.execute("""
-            SELECT id, content, label FROM stock
-            WHERE service_id = ? AND delivered = 0
-            ORDER BY added_at ASC LIMIT 1
-        """, (service_id,)) as cur:
-            row = await cur.fetchone()
-
-        if not row:
-            return None
-
-        item = dict(row)
-        await db.execute("""
-            UPDATE stock
-            SET delivered = 1, order_id = ?, delivered_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND delivered = 0
-        """, (order_id, item["id"]))
-        await db.commit()
-        return item
+async def add_stock_items(service_id: str, items: list[str],
+                          label: str = None) -> int:
+    count = 0
+    for content in items:
+        content = content.strip()
+        if content:
+            await _exec(
+                "INSERT INTO stock (service_id, content, label) VALUES ($1, $2, $3)",
+                service_id, content, label)
+            count += 1
+    return count
 
 
-async def get_stock_levels() -> list[dict]:
-    """Returns available stock count per service_id."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT service_id,
-                   COUNT(*) FILTER (WHERE delivered = 0) AS available,
-                   COUNT(*) FILTER (WHERE delivered = 1) AS delivered
-            FROM stock
-            GROUP BY service_id
-            ORDER BY service_id
-        """) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+async def take_stock_items_multi(service_id: str, order_id: int,
+                                  qty: int) -> list[dict]:
+    """Atomically grab up to qty undelivered items."""
+    if _USE_PG:
+        async with (await _get_pool()).acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch("""
+                    SELECT id, content, label FROM stock
+                    WHERE service_id=$1 AND delivered=0
+                    ORDER BY added_at ASC LIMIT $2
+                    FOR UPDATE SKIP LOCKED
+                """, service_id, qty)
+                items = [dict(r) for r in rows]
+                if items:
+                    ids = [it["id"] for it in items]
+                    await conn.execute("""
+                        UPDATE stock SET delivered=1, order_id=$1,
+                            delivered_at=NOW()
+                        WHERE id = ANY($2::int[])
+                    """, order_id, ids)
+                return items
+    else:
+        import aiosqlite as _aio
+        async with _aio.connect(DATABASE_PATH) as db:
+            db.row_factory = _aio.Row
+            async with db.execute("""
+                SELECT id, content, label FROM stock
+                WHERE service_id=? AND delivered=0
+                ORDER BY added_at ASC LIMIT ?
+            """, (service_id, qty)) as cur:
+                rows = await cur.fetchall()
+            items = [dict(r) for r in rows]
+            for it in items:
+                await db.execute("""
+                    UPDATE stock SET delivered=1, order_id=?,
+                        delivered_at=CURRENT_TIMESTAMP
+                    WHERE id=? AND delivered=0
+                """, (order_id, it["id"]))
+            await db.commit()
+            return items
 
 
 async def get_stock_level(service_id: str) -> int:
-    """Returns available item count for one service."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM stock WHERE service_id = ? AND delivered = 0",
-            (service_id,)
-        ) as cur:
-            return (await cur.fetchone())[0]
-
-
-async def take_stock_items_multi(service_id: str, order_id: int, qty: int) -> list[dict]:
-    """
-    Atomically grab `qty` undelivered items for the service.
-    Returns list of item dicts (may be shorter than qty if stock runs out).
-    """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT id, content, label FROM stock
-            WHERE service_id = ? AND delivered = 0
-            ORDER BY added_at ASC LIMIT ?
-        """, (service_id, qty)) as cur:
-            rows = await cur.fetchall()
-
-        items = [dict(r) for r in rows]
-        for item in items:
-            await db.execute("""
-                UPDATE stock
-                SET delivered = 1, order_id = ?, delivered_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND delivered = 0
-            """, (order_id, item["id"]))
-        await db.commit()
-        return items
+    return (await _fetchval(
+        "SELECT COUNT(*) FROM stock WHERE service_id=$1 AND delivered=0",
+        service_id)) or 0
 
 
 async def get_stock_levels_dict() -> dict:
-    """Returns {service_id: available_count} for all services with stock."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute("""
-            SELECT service_id, COUNT(*) as cnt
-            FROM stock WHERE delivered = 0
-            GROUP BY service_id
-        """) as cur:
-            rows = await cur.fetchall()
-            return {row[0]: row[1] for row in rows}
+    rows = await _fetch("""
+        SELECT service_id, COUNT(*) AS cnt
+        FROM stock WHERE delivered=0 GROUP BY service_id
+    """)
+    return {r["service_id"]: r["cnt"] for r in rows}
 
 
 async def get_stock_items(service_id: str, limit: int = 50) -> list[dict]:
-    """Returns available (undelivered) stock items for a service."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT id, content, label, added_at
-            FROM stock
-            WHERE service_id = ? AND delivered = 0
-            ORDER BY added_at ASC LIMIT ?
-        """, (service_id, limit)) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    return await _fetch("""
+        SELECT id, content, label, added_at FROM stock
+        WHERE service_id=$1 AND delivered=0
+        ORDER BY added_at ASC LIMIT $2
+    """, service_id, limit)
 
 
-async def get_stock_delivered(service_id: str, limit: int = 20) -> list[dict]:
-    """Returns recently delivered stock items for a service."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT id, content, order_id, delivered_at
-            FROM stock
-            WHERE service_id = ? AND delivered = 1
-            ORDER BY delivered_at DESC LIMIT ?
-        """, (service_id, limit)) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+async def get_stock_delivered(service_id: str, limit: int = 10) -> list[dict]:
+    return await _fetch("""
+        SELECT id, content, order_id, delivered_at FROM stock
+        WHERE service_id=$1 AND delivered=1
+        ORDER BY delivered_at DESC LIMIT $2
+    """, service_id, limit)
 
 
 async def delete_stock_item(item_id: int) -> bool:
-    """Hard-delete a stock item by ID. Returns True if found and deleted."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        async with db.execute(
-            "SELECT id FROM stock WHERE id = ? AND delivered = 0", (item_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return False
-        await db.execute("DELETE FROM stock WHERE id = ?", (item_id,))
-        await db.commit()
-        return True
+    row = await _fetchrow(
+        "SELECT id FROM stock WHERE id=$1 AND delivered=0", item_id)
+    if not row:
+        return False
+    await _exec("DELETE FROM stock WHERE id=$1", item_id)
+    return True
 
 
 async def get_all_stock_summary() -> list[dict]:
-    """Returns summary of all services: available + delivered counts."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT service_id,
-                   SUM(CASE WHEN delivered=0 THEN 1 ELSE 0 END) AS available,
-                   SUM(CASE WHEN delivered=1 THEN 1 ELSE 0 END) AS delivered
-            FROM stock
-            GROUP BY service_id
-            ORDER BY service_id
-        """) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+    return await _fetch("""
+        SELECT service_id,
+               SUM(CASE WHEN delivered=0 THEN 1 ELSE 0 END) AS available,
+               SUM(CASE WHEN delivered=1 THEN 1 ELSE 0 END) AS delivered
+        FROM stock GROUP BY service_id ORDER BY service_id
+    """)

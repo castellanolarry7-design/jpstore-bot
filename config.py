@@ -24,7 +24,12 @@ BINANCE_API_KEY: str    = os.getenv("BINANCE_API_KEY", "")
 BINANCE_API_SECRET: str = os.getenv("BINANCE_API_SECRET", "")
 BINANCE_PAY_ENABLED: bool = True  # Siempre habilitado (pago manual por ID)
 
-# ── Database ──────────────────────────────────────────────
+# ── Database ─────────────────────────────────────────────
+# Set DATABASE_URL to a PostgreSQL URL (recommended for production).
+# Example (Supabase / Railway Postgres):
+#   postgresql://user:password@host:5432/dbname
+# If not set, falls back to local SQLite store.db
+DATABASE_URL:  str = os.getenv("DATABASE_URL", "")
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "store.db")
 
 # ── Admin stock password ──────────────────────────────────
@@ -202,20 +207,4 @@ METHODS: dict = {
         "name": "Grok Unlimited Monthly Accounts",
         "emoji": "♾️",
         "description": {
-            "en": (
-                "• Unlimited Grok accounts for the current month\n"
-                "• Bulk access – create as many as you need\n"
-                "• Full method + automation guide\n"
-                "• Valid until end of month"
-            ),
-            "es": (
-                "• Cuentas Grok ilimitadas durante el mes actual\n"
-                "• Acceso masivo – crea cuantas necesites\n"
-                "• Método completo + guía de automatización\n"
-                "• Válido hasta fin de mes"
-            ),
-        },
-        "price": 70.00,
-        "delivery": {"en": "Instant", "es": "Inmediata"},
-    },
-}
+            

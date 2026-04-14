@@ -17,8 +17,9 @@ from config import (
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"   # USDT on TRON
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"  # USDT on BSC
 
-POLL_INTERVAL = 30   # seconds between blockchain checks
-TOLERANCE     = 0.005  # $0.005 tolerance for amount matching
+POLL_INTERVAL    = 30    # seconds between blockchain checks
+TOLERANCE        = 0.005 # $0.005 tolerance for amount matching
+DEFAULT_TIMEOUT  = 900   # 15 minutes
 
 
 def unique_amount(base_price: float, order_id: int) -> float:
@@ -144,13 +145,13 @@ async def get_bep20_transactions(address: str, min_timestamp_s: int = 0) -> list
 async def monitor_crypto_payment(
     bot,
     order_id: int,
-    network: str,          # 'trc20' | 'bep20'
+    network: str,
     expected_amount: float,
     user_id: int,
     service_name: str,
     lang: str,
     qty: int = 1,
-    timeout_seconds: int = 3600,   # 1 hour default
+    timeout_seconds: int = DEFAULT_TIMEOUT,
 ) -> None:
     """
     Background task: polls blockchain every 30s until payment found or timeout.
@@ -201,53 +202,64 @@ async def monitor_crypto_payment(
                     admin_note=f"Auto-detected {network.upper()} payment | TX: {tx_id}"
                 )
 
-                # Send payment confirmation to user
+                # ── Delete the payment instruction message ─────────────────
                 order = await db.get_order(order_id)
-                if lang == "en":
-                    confirm_msg = (
-                        f"✅ <b>Payment detected!</b>\n\n"
-                        f"🆔 Order #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT | 🔗 <code>{tx_id}</code>"
-                    )
-                else:
-                    confirm_msg = (
-                        f"✅ <b>¡Pago detectado!</b>\n\n"
-                        f"🆔 Pedido #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT | 🔗 <code>{tx_id}</code>"
-                    )
-                try:
-                    await bot.send_message(chat_id=user_id, text=confirm_msg, parse_mode="HTML")
-                except Exception:
-                    pass
+                if order and order.get("instruction_msg_id"):
+                    try:
+                        await bot.delete_message(
+                            chat_id=order["instruction_chat_id"],
+                            message_id=order["instruction_msg_id"]
+                        )
+                    except Exception:
+                        pass
 
                 # ── Auto-deliver from stock ────────────────────────────────
                 from utils.delivery import auto_deliver
-                service_id = order["service_id"]
-                await auto_deliver(bot, order_id, service_id, user_id, lang, qty=qty)
+                service_id     = order["service_id"]
+                stock_delivered = await auto_deliver(
+                    bot, order_id, service_id, user_id, lang, qty=qty)
 
-                # Notify admins of the new order
-                user = await db.get_user(user_id)
-                await notify_admins_new_order(bot, order, user)
+                # ── If manual delivery needed → notify admins ──────────────
+                if not stock_delivered:
+                    user = await db.get_user(user_id)
+                    await notify_admins_new_order(bot, order, user)
+                # (if auto-delivered, admin was already notified inside auto_deliver)
+
+                # Topup orders → add credits to user balance
+                if order.get("item_type") == "topup":
+                    await db.add_credits(user_id, order["amount"])
 
                 # Handle referral credit
                 from handlers.referrals import handle_first_purchase_referral
                 await handle_first_purchase_referral(bot, user_id)
                 return
 
-    # Timeout reached — order stays pending, notify user
+    # Timeout — cancel order, delete instruction message, notify user
     order = await db.get_order(order_id)
     if order and order["status"] == "pending":
+        await db.update_order_status(order_id, "cancelled",
+                                     admin_note="Auto-cancelled: 15min timeout")
+        # Delete instruction message
+        if order.get("instruction_msg_id"):
+            try:
+                await bot.delete_message(chat_id=order["instruction_chat_id"],
+                                         message_id=order["instruction_msg_id"])
+            except Exception:
+                pass
+
         if lang == "en":
             timeout_msg = (
-                f"⏰ <b>Payment window expired</b>\n\n"
-                f"Order #{order_id} — we didn't detect a payment in 1 hour.\n"
-                "If you already paid, send your TX proof and we'll verify manually. 💙"
+                f"⏰ <b>Order #{order_id} expired</b>\n\n"
+                "We didn't detect your payment in 15 minutes. "
+                "The order was cancelled automatically.\n\n"
+                "If you already sent the payment, contact support 💙"
             )
         else:
             timeout_msg = (
-                f"⏰ <b>Ventana de pago expirada</b>\n\n"
-                f"Pedido #{order_id} — no detectamos pago en 1 hora.\n"
-                "Si ya pagaste, envía tu comprobante TX y lo verificamos manualmente. 💙"
+                f"⏰ <b>Pedido #{order_id} vencido</b>\n\n"
+                "No detectamos tu pago en 15 minutos. "
+                "El pedido fue cancelado automáticamente.\n\n"
+                "Si ya enviaste el pago, contacta soporte 💙"
             )
         try:
             await bot.send_message(chat_id=user_id, text=timeout_msg, parse_mode="HTML")
