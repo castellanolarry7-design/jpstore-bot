@@ -114,23 +114,19 @@ def order_confirm_kb(order_id: int, lang: str = "en") -> InlineKeyboardMarkup:
 
 def admin_order_kb(order_id: int, user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Mark PAID",    callback_data=f"admin_paid_{order_id}"),
-            InlineKeyboardButton("🚀 DELIVER",      callback_data=f"admin_deliver_{order_id}"),
-        ],
-        [
-            InlineKeyboardButton("❌ Cancel",        callback_data=f"admin_cancel_{order_id}"),
-            InlineKeyboardButton("💬 Message user",  callback_data=f"admin_msg_{user_id}"),
-        ],
+        [InlineKeyboardButton("✅ Marcar PAGADO",  callback_data=f"admin_paid_{order_id}"),
+         InlineKeyboardButton("🚀 ENTREGAR",       callback_data=f"admin_deliver_{order_id}")],
+        [InlineKeyboardButton("❌ Cancelar",       callback_data=f"admin_cancel_{order_id}")],
     ])
 
 
 def admin_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Pending Orders",  callback_data="admin_pending")],
-        [InlineKeyboardButton("📊 Statistics",      callback_data="admin_stats")],
-        [InlineKeyboardButton("👥 Users",           callback_data="admin_users")],
-        [InlineKeyboardButton("📢 Broadcast",       callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📋 Pedidos pendientes",  callback_data="admin_pending"),
+         InlineKeyboardButton("📊 Estadísticas",        callback_data="admin_stats")],
+        [InlineKeyboardButton("👥 Usuarios",            callback_data="admin_users"),
+         InlineKeyboardButton("📢 Broadcast",           callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📦 Gestión de Stock",    callback_data="admin_stock")],
     ])
 
 

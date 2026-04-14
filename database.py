@@ -460,3 +460,58 @@ async def get_stock_levels_dict() -> dict:
         """) as cur:
             rows = await cur.fetchall()
             return {row[0]: row[1] for row in rows}
+
+
+async def get_stock_items(service_id: str, limit: int = 50) -> list[dict]:
+    """Returns available (undelivered) stock items for a service."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT id, content, label, added_at
+            FROM stock
+            WHERE service_id = ? AND delivered = 0
+            ORDER BY added_at ASC LIMIT ?
+        """, (service_id, limit)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_stock_delivered(service_id: str, limit: int = 20) -> list[dict]:
+    """Returns recently delivered stock items for a service."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT id, content, order_id, delivered_at
+            FROM stock
+            WHERE service_id = ? AND delivered = 1
+            ORDER BY delivered_at DESC LIMIT ?
+        """, (service_id, limit)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_stock_item(item_id: int) -> bool:
+    """Hard-delete a stock item by ID. Returns True if found and deleted."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM stock WHERE id = ? AND delivered = 0", (item_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return False
+        await db.execute("DELETE FROM stock WHERE id = ?", (item_id,))
+        await db.commit()
+        return True
+
+
+async def get_all_stock_summary() -> list[dict]:
+    """Returns summary of all services: available + delivered counts."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT service_id,
+                   SUM(CASE WHEN delivered=0 THEN 1 ELSE 0 END) AS available,
+                   SUM(CASE WHEN delivered=1 THEN 1 ELSE 0 END) AS delivered
+            FROM stock
+            GROUP BY service_id
+            ORDER BY service_id
+        """) as cur:
+            return [dict(r) for r in await cur.fetchall()]
