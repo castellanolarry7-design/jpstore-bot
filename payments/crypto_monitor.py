@@ -149,6 +149,7 @@ async def monitor_crypto_payment(
     user_id: int,
     service_name: str,
     lang: str,
+    qty: int = 1,
     timeout_seconds: int = 3600,   # 1 hour default
 ) -> None:
     """
@@ -200,31 +201,32 @@ async def monitor_crypto_payment(
                     admin_note=f"Auto-detected {network.upper()} payment | TX: {tx_id}"
                 )
 
-                # Notify user
+                # Send payment confirmation to user
+                order = await db.get_order(order_id)
                 if lang == "en":
-                    msg = (
-                        f"✅ <b>Payment detected automatically!</b>\n\n"
+                    confirm_msg = (
+                        f"✅ <b>Payment detected!</b>\n\n"
                         f"🆔 Order #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT received\n"
-                        f"🔗 TX: <code>{tx_id}</code>\n\n"
-                        "We'll deliver your service within 24 hours ⏱️"
+                        f"💵 ${tx['amount']:.2f} USDT | 🔗 <code>{tx_id}</code>"
                     )
                 else:
-                    msg = (
-                        f"✅ <b>¡Pago detectado automáticamente!</b>\n\n"
+                    confirm_msg = (
+                        f"✅ <b>¡Pago detectado!</b>\n\n"
                         f"🆔 Pedido #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT recibido\n"
-                        f"🔗 TX: <code>{tx_id}</code>\n\n"
-                        "Te entregaremos el servicio en menos de 24 horas ⏱️"
+                        f"💵 ${tx['amount']:.2f} USDT | 🔗 <code>{tx_id}</code>"
                     )
                 try:
-                    await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
+                    await bot.send_message(chat_id=user_id, text=confirm_msg, parse_mode="HTML")
                 except Exception:
                     pass
 
-                # Notify admins
-                order = await db.get_order(order_id)
-                user  = await db.get_user(user_id)
+                # ── Auto-deliver from stock ────────────────────────────────
+                from utils.delivery import auto_deliver
+                service_id = order["service_id"]
+                await auto_deliver(bot, order_id, service_id, user_id, lang, qty=qty)
+
+                # Notify admins of the new order
+                user = await db.get_user(user_id)
                 await notify_admins_new_order(bot, order, user)
 
                 # Handle referral credit

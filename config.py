@@ -27,6 +27,10 @@ BINANCE_PAY_ENABLED: bool = True  # Siempre habilitado (pago manual por ID)
 # ── Database ──────────────────────────────────────────────
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "store.db")
 
+# ── Admin stock password ──────────────────────────────────
+# Set this in your .env / Railway variables as ADMIN_PASSWORD
+ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
+
 # ── Referral reward ───────────────────────────────────────
 REFERRAL_REWARD: float = 1.00   # USD credit per successful referral
 

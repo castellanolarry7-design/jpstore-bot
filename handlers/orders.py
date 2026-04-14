@@ -31,23 +31,31 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     lang = await db.get_user_lang(query.from_user.id)
 
+    # ── Resolve quantity and price (with discount) ────────────────────────────
+    from utils.delivery import apply_discount
+    qty = context.user_data.pop("order_qty", 1)
+    unit_disc, total_price, disc_rate = apply_discount(svc["price"], qty)
+
     # ── Binance Pay — ask payer ID first ──────────────────────────────────────
     if network == "binance":
         # Create a pending order without starting the monitor yet
         order_id = await db.create_order(
-            query.from_user.id, service_id, svc["price"], "binance_pay")
+            query.from_user.id, service_id, total_price, "binance_pay")
 
         # Store pending info in context so next handler can use it
         context.user_data["bp_order_id"]   = order_id
         context.user_data["bp_service_id"] = service_id
         context.user_data["bp_lang"]       = lang
         context.user_data["bp_item_type"]  = "service"
+        context.user_data["bp_qty"]        = qty
 
+        qty_label = f" x{qty}" if qty > 1 else ""
+        disc_note = (f" <i>(-{int(disc_rate*100)}%)</i>" if disc_rate > 0 else "")
         if lang == "en":
             msg = (
                 f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
-                f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
-                f"💵 ${svc['price']:.2f} USDT\n\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
+                f"💵 ${total_price:.2f} USDT{disc_note}\n\n"
                 "Before showing the payment address, please send us "
                 "<b>your Binance Pay ID</b> (the numeric ID of your account).\n\n"
                 "📍 <i>Find it in Binance App → Pay → My QR → your ID number below the QR</i>\n\n"
@@ -56,8 +64,8 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             msg = (
                 f"🟠 <b>Binance Pay — Paso 1 de 2</b>\n\n"
-                f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
-                f"💵 ${svc['price']:.2f} USDT\n\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
+                f"💵 ${total_price:.2f} USDT{disc_note}\n\n"
                 "Antes de mostrarte la dirección de pago, envíanos "
                 "<b>tu ID de Binance Pay</b> (el número de tu cuenta).\n\n"
                 "📍 <i>Encuéntralo en Binance App → Pay → Mi QR → el número bajo el código QR</i>\n\n"
@@ -69,11 +77,11 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # ── TRC20 / BEP20 — auto-monitored ───────────────────────────────────────
     order_id = await db.create_order(
-        query.from_user.id, service_id, svc["price"], network)
+        query.from_user.id, service_id, total_price, network)
 
     # Generate unique amount to identify the payment on-chain
     from payments.crypto_monitor import unique_amount, monitor_crypto_payment
-    pay_amount = unique_amount(svc["price"], order_id)
+    pay_amount = unique_amount(total_price, order_id)
 
     if network == "trc20":
         address  = USDT_TRC20 or "⚠️ Not configured"
@@ -99,9 +107,11 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         exact_label = "Envía EXACTAMENTE"
 
+    qty_label  = f" x{qty}" if qty > 1 else ""
+    disc_label = (f" <i>(-{int(disc_rate*100)}%)</i>" if disc_rate > 0 else "")
     text = (
         f"📋 <b>{'Order' if lang=='en' else 'Pedido'} #{order_id}</b>\n\n"
-        f"🛒 {svc['emoji']} <b>{svc['name']}</b>\n"
+        f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>{disc_label}\n"
         f"💳 {net_name}\n\n"
         f"📤 <b>{'Address' if lang=='en' else 'Dirección'}:</b>\n"
         f"<code>{address}</code>\n\n"
@@ -132,6 +142,7 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         user_id=query.from_user.id,
         service_name=svc["name"],
         lang=lang,
+        qty=qty,
         timeout_seconds=3600,
     ))
 
@@ -145,6 +156,7 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     service_id = context.user_data.get("bp_service_id")
     lang       = context.user_data.get("bp_lang", "en")
     item_type  = context.user_data.get("bp_item_type", "service")
+    qty        = context.user_data.get("bp_qty", 1)
 
     if not order_id:
         await update.message.reply_text("❌ Session expired. Please start again.")
@@ -228,11 +240,12 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         user_id=update.effective_user.id,
         service_name=item["name"],
         lang=lang,
+        qty=qty,
         timeout_seconds=3600,
     ))
 
     # Clear context
-    for k in ("bp_order_id", "bp_service_id", "bp_lang", "bp_item_type"):
+    for k in ("bp_order_id", "bp_service_id", "bp_lang", "bp_item_type", "bp_qty"):
         context.user_data.pop(k, None)
 
     return ConversationHandler.END

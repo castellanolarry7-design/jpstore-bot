@@ -24,12 +24,24 @@ def language_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def catalog_kb(lang: str = "en") -> InlineKeyboardMarkup:
+def stock_badge(qty: int, lang: str) -> str:
+    """Returns a stock status badge string."""
+    if qty == 0:
+        return "🔴 " + ("No stock" if lang == "en" else "Sin stock")
+    if qty <= 3:
+        return f"🟡 {qty} " + ("left" if lang == "en" else "disponibles")
+    return f"🟢 {qty} " + ("in stock" if lang == "en" else "disponibles")
+
+
+def catalog_kb(lang: str = "en", stock_levels: dict = None) -> InlineKeyboardMarkup:
+    stock_levels = stock_levels or {}
     buttons = []
     for svc in SERVICES.values():
+        qty = stock_levels.get(svc["id"], 0)
+        badge = f" | {stock_badge(qty, lang)}" if stock_levels else ""
         buttons.append([
             InlineKeyboardButton(
-                f"{svc['emoji']} {svc['name']} — ${svc['price']:.2f} USDT",
+                f"{svc['emoji']} {svc['name']} — ${svc['price']:.2f}{badge}",
                 callback_data=f"service_{svc['id']}"
             )
         ])
@@ -37,11 +49,51 @@ def catalog_kb(lang: str = "en") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
-def service_detail_kb(service_id: str, lang: str = "en") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t("btn_buy_now", lang),    callback_data=f"buy_{service_id}")],
-        [InlineKeyboardButton(t("btn_to_catalog", lang), callback_data="catalog")],
-    ])
+def service_detail_kb(service_id: str, lang: str = "en", stock_qty: int = -1) -> InlineKeyboardMarkup:
+    """
+    If stock_qty >= 0, shows a "Select quantity" button instead of direct buy.
+    If stock_qty < 0 (unknown), shows direct buy.
+    """
+    rows = []
+    if stock_qty == 0:
+        # Out of stock — disable buy, show contact support
+        rows.append([InlineKeyboardButton(
+            "🔴 " + ("Out of stock" if lang == "en" else "Sin stock"),
+            callback_data="noop"
+        )])
+    elif stock_qty > 0:
+        rows.append([InlineKeyboardButton(
+            "🛒 " + ("Select quantity" if lang == "en" else "Seleccionar cantidad"),
+            callback_data=f"qtysel_{service_id}"
+        )])
+    else:
+        # No stock info — direct buy
+        rows.append([InlineKeyboardButton(t("btn_buy_now", lang), callback_data=f"buy_{service_id}")])
+    rows.append([InlineKeyboardButton(t("btn_to_catalog", lang), callback_data="catalog")])
+    return InlineKeyboardMarkup(rows)
+
+
+def quantity_kb(service_id: str, unit_price: float, max_stock: int, lang: str = "en") -> InlineKeyboardMarkup:
+    """Quantity selector with discount labels."""
+    from utils.delivery import apply_discount
+
+    options = [1, 2, 3, 5, 10, 20]
+    rows = []
+    row = []
+    for qty in options:
+        if qty > max_stock:
+            continue
+        _, total, rate = apply_discount(unit_price, qty)
+        disc_label = f" (-{int(rate*100)}%)" if rate > 0 else ""
+        label = f"{qty}x = ${total:.2f}{disc_label}"
+        row.append(InlineKeyboardButton(label, callback_data=f"qty_{service_id}_{qty}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(t("btn_back", lang), callback_data=f"service_{service_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def payment_method_kb(service_id: str, lang: str = "en") -> InlineKeyboardMarkup:

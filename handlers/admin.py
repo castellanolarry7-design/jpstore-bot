@@ -3,15 +3,17 @@ admin.py – Panel de administración
 """
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters, CommandHandler
-from config import ADMIN_IDS, SERVICES
+from config import ADMIN_IDS, SERVICES, METHODS, ADMIN_PASSWORD
 import database as db
 from utils.keyboards import admin_main_kb, admin_order_kb
 from utils.notifications import notify_order_delivered, notify_order_status
 
 # Estados de conversación
-WAITING_DELIVERY_INFO = 10
-WAITING_BROADCAST_MSG = 11
-WAITING_MSG_TO_USER   = 12
+WAITING_DELIVERY_INFO  = 10
+WAITING_BROADCAST_MSG  = 11
+WAITING_MSG_TO_USER    = 12
+WAITING_STOCK_PASSWORD = 20   # hidden stock commands
+WAITING_STOCK_ITEMS    = 21
 
 
 def is_admin(user_id: int) -> bool:
@@ -283,3 +285,157 @@ async def admin_cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.answer()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STOCK COMMANDS (hidden — not listed anywhere, password-protected)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── /addstock <service_id> ────────────────────────────────────────────────────
+
+async def cmd_addstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point: /addstock <service_id>"""
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    args = context.args
+    if not args:
+        all_ids = list(SERVICES.keys()) + list(METHODS.keys())
+        await update.message.reply_text(
+            "⚠️ Uso: <code>/addstock &lt;service_id&gt;</code>\n\n"
+            "IDs disponibles:\n" + "\n".join(f"  • <code>{i}</code>" for i in all_ids),
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    service_id = args[0].strip()
+    svc = SERVICES.get(service_id) or METHODS.get(service_id)
+    if not svc:
+        await update.message.reply_text(
+            f"❌ ID <code>{service_id}</code> no encontrado.",
+            parse_mode="HTML"
+        )
+        return ConversationHandler.END
+
+    context.user_data["stock_service_id"] = service_id
+    context.user_data["stock_service_name"] = svc["name"]
+    context.user_data["stock_action"] = "add"
+
+    await update.message.reply_text(
+        "🔐 <b>Comando protegido</b>\n\nIngresa la contraseña de admin:",
+        parse_mode="HTML"
+    )
+    return WAITING_STOCK_PASSWORD
+
+
+# ── /stock  (ver niveles) ─────────────────────────────────────────────────────
+
+async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point: /stock — show all stock levels"""
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    context.user_data["stock_action"] = "view"
+    await update.message.reply_text(
+        "🔐 <b>Comando protegido</b>\n\nIngresa la contraseña de admin:",
+        parse_mode="HTML"
+    )
+    return WAITING_STOCK_PASSWORD
+
+
+# ── Verificar contraseña ───────────────────────────────────────────────────────
+
+async def stock_check_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Validates the admin password."""
+    entered = update.message.text.strip()
+
+    # Delete the password message immediately for security
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if not ADMIN_PASSWORD or entered != ADMIN_PASSWORD:
+        await update.message.reply_text("❌ Contraseña incorrecta.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    action = context.user_data.get("stock_action")
+
+    if action == "view":
+        # Show stock levels right away
+        levels = await db.get_stock_levels()
+        if not levels:
+            await update.message.reply_text("📦 No hay stock registrado aún.")
+            return ConversationHandler.END
+
+        lines = ["📦 <b>Stock disponible</b>\n"]
+        for row in levels:
+            svc = SERVICES.get(row["service_id"]) or METHODS.get(row["service_id"]) or {}
+            name = svc.get("name", row["service_id"])
+            avail = row["available"]
+            icon  = "🟢" if avail > 3 else ("🟡" if avail > 0 else "🔴")
+            lines.append(
+                f"{icon} <b>{name}</b> — "
+                f"{avail} disponibles / {row['delivered']} entregadas"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    elif action == "add":
+        service_id   = context.user_data.get("stock_service_id")
+        service_name = context.user_data.get("stock_service_name")
+        current      = await db.get_stock_level(service_id)
+        await update.message.reply_text(
+            f"✅ <b>Acceso concedido</b>\n\n"
+            f"Servicio: <b>{service_name}</b>\n"
+            f"Stock actual: <b>{current}</b> unidades disponibles\n\n"
+            "Envía las credenciales, <b>una por línea</b>:\n"
+            "<code>usuario@email.com:contraseña</code>\n"
+            "<code>usuario2@email.com:contraseña2</code>\n\n"
+            "<i>/cancelar para abortar</i>",
+            parse_mode="HTML"
+        )
+        return WAITING_STOCK_ITEMS
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ── Recibir los ítems de stock ─────────────────────────────────────────────────
+
+async def stock_receive_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives the stock items (one per line) and saves to DB."""
+    service_id   = context.user_data.get("stock_service_id")
+    service_name = context.user_data.get("stock_service_name", service_id)
+
+    if not service_id:
+        return ConversationHandler.END
+
+    raw_lines = update.message.text.strip().splitlines()
+    items = [line.strip() for line in raw_lines if line.strip()]
+
+    if not items:
+        await update.message.reply_text(
+            "⚠️ No se detectaron ítems. Envía uno por línea."
+        )
+        return WAITING_STOCK_ITEMS
+
+    added = await db.add_stock_items(service_id, items)
+    total = await db.get_stock_level(service_id)
+
+    await update.message.reply_text(
+        f"✅ <b>{added} credencial(es) agregada(s)</b>\n\n"
+        f"Servicio: <b>{service_name}</b>\n"
+        f"Total disponible ahora: <b>{total}</b> unidades\n\n"
+        "Puedes enviar más ahora o escribir /cancelar para terminar.",
+        parse_mode="HTML"
+    )
+    return WAITING_STOCK_ITEMS   # stay open to add more
+
+
+async def stock_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+    await update.message.reply_text("✅ Operación cancelada.")
+    return ConversationHandler.END

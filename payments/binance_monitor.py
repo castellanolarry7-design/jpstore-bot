@@ -106,10 +106,11 @@ async def monitor_binance_pay_payment(
     bot,
     order_id: int,
     expected_amount: float,
-    payer_binance_id: str,        # ← new: sender's Binance Pay ID
+    payer_binance_id: str,
     user_id: int,
     service_name: str,
     lang: str,
+    qty: int = 1,
     timeout_seconds: int = 3600,
 ) -> None:
     """
@@ -172,31 +173,32 @@ async def monitor_binance_pay_payment(
                                f"from: {tx['payer']}"
                 )
 
-                # Notify user
+                # Send payment confirmation to user
                 if lang == "en":
-                    msg = (
-                        f"✅ <b>Binance Pay payment confirmed!</b>\n\n"
+                    confirm_msg = (
+                        f"✅ <b>Binance Pay confirmed!</b>\n\n"
                         f"🆔 Order #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT received\n"
-                        f"🔖 TX: <code>{tx_id}</code>\n\n"
-                        "We'll deliver your service within 24 hours ⏱️"
+                        f"💵 ${tx['amount']:.2f} USDT | 🔖 <code>{tx_id}</code>"
                     )
                 else:
-                    msg = (
-                        f"✅ <b>¡Pago Binance Pay confirmado!</b>\n\n"
+                    confirm_msg = (
+                        f"✅ <b>¡Binance Pay confirmado!</b>\n\n"
                         f"🆔 Pedido #{order_id} — {service_name}\n"
-                        f"💵 ${tx['amount']:.2f} USDT recibido\n"
-                        f"🔖 TX: <code>{tx_id}</code>\n\n"
-                        "Te entregaremos el servicio en menos de 24 horas ⏱️"
+                        f"💵 ${tx['amount']:.2f} USDT | 🔖 <code>{tx_id}</code>"
                     )
                 try:
-                    await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
+                    await bot.send_message(chat_id=user_id, text=confirm_msg, parse_mode="HTML")
                 except Exception:
                     pass
 
+                # ── Auto-deliver from stock ────────────────────────────────
+                from utils.delivery import auto_deliver
+                order      = await db.get_order(order_id)
+                service_id = order["service_id"]
+                await auto_deliver(bot, order_id, service_id, user_id, lang, qty=qty)
+
                 # Notify admins
-                order  = await db.get_order(order_id)
-                user   = await db.get_user(user_id)
+                user = await db.get_user(user_id)
                 await notify_admins_new_order(bot, order, user)
 
                 # Referral credit

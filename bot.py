@@ -17,7 +17,8 @@ from database import init_db
 
 # Handlers
 from handlers.start    import start, show_language_selector, set_language, support
-from handlers.catalog  import show_catalog, show_service, show_payment_methods
+from handlers.catalog  import (show_catalog, show_service, show_payment_methods,
+                                show_quantity_selector, select_quantity)
 from handlers.methods  import (show_methods, show_method_detail,
                                 show_method_payment, initiate_method_payment)
 from handlers.referrals import show_referrals
@@ -32,7 +33,10 @@ from handlers.admin    import (
     admin_mark_paid, admin_deliver_start, admin_deliver_confirm,
     admin_cancel_order, admin_broadcast_start, admin_broadcast_send,
     admin_users, admin_cancel_conv, noop_callback,
+    cmd_addstock, cmd_stock, stock_check_password,
+    stock_receive_items, stock_cancel,
     WAITING_DELIVERY_INFO, WAITING_BROADCAST_MSG,
+    WAITING_STOCK_PASSWORD, WAITING_STOCK_ITEMS,
 )
 
 logging.basicConfig(
@@ -54,6 +58,30 @@ def build_application() -> Application:
     # ── /start & /admin ───────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+
+    # ── Conversation: hidden stock management (admin only) ────────────────────
+    stock_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("addstock", cmd_addstock),
+            CommandHandler("stock",    cmd_stock),
+        ],
+        states={
+            WAITING_STOCK_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_check_password),
+            ],
+            WAITING_STOCK_ITEMS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, stock_receive_items),
+                CommandHandler("cancelar", stock_cancel),
+                CommandHandler("cancel",   stock_cancel),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancelar", stock_cancel),
+            CommandHandler("cancel",   stock_cancel),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(stock_conv)
 
     # ── Conversation: Binance Pay payer ID collection ─────────────────────────
     payer_id_conv = ConversationHandler(
@@ -132,10 +160,12 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(set_language,           pattern=r"^setlang_(en|es)$"))
 
     # ── Catalog ───────────────────────────────────────────────────────────────
-    app.add_handler(CallbackQueryHandler(show_catalog,           pattern=r"^catalog$"))
-    app.add_handler(CallbackQueryHandler(show_service,           pattern=r"^service_.+$"))
-    app.add_handler(CallbackQueryHandler(show_payment_methods,   pattern=r"^buy_.+$"))
-    app.add_handler(CallbackQueryHandler(initiate_payment,       pattern=r"^pay_(trc20|bep20)_.+$"))
+    app.add_handler(CallbackQueryHandler(show_catalog,            pattern=r"^catalog$"))
+    app.add_handler(CallbackQueryHandler(show_service,            pattern=r"^service_.+$"))
+    app.add_handler(CallbackQueryHandler(show_quantity_selector,  pattern=r"^qtysel_.+$"))
+    app.add_handler(CallbackQueryHandler(select_quantity,         pattern=r"^qty_.+_\d+$"))
+    app.add_handler(CallbackQueryHandler(show_payment_methods,    pattern=r"^buy_.+$"))
+    app.add_handler(CallbackQueryHandler(initiate_payment,        pattern=r"^pay_(trc20|bep20)_.+$"))
 
     # ── Methods ───────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_methods,            pattern=r"^methods$"))

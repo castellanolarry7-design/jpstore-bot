@@ -40,6 +40,21 @@ async def _migrate(db) -> None:
             if col not in order_cols:
                 await db.execute(sql)
 
+    # ── stock columns (only if table exists) ─────────────────────────────────
+    async with db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='stock'"
+    ) as cur:
+        stock_exists = await cur.fetchone()
+
+    if stock_exists:
+        async with db.execute("PRAGMA table_info(stock)") as cur:
+            stock_cols = {row[1] for row in await cur.fetchall()}
+        for col, sql in {
+            "label": "ALTER TABLE stock ADD COLUMN label TEXT",
+        }.items():
+            if col not in stock_cols:
+                await db.execute(sql)
+
     await db.commit()
 
 
@@ -79,6 +94,19 @@ async def init_db() -> None:
                 delivery_info    TEXT,
                 admin_note       TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(user_id)
+            )
+        """)
+        # Stock table — one row per deliverable item
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS stock (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                service_id   TEXT    NOT NULL,
+                content      TEXT    NOT NULL,
+                label        TEXT,
+                delivered    INTEGER DEFAULT 0,
+                order_id     INTEGER,
+                delivered_at TIMESTAMP,
+                added_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         # Referrals table
@@ -324,3 +352,111 @@ async def get_referral_count(user_id: int) -> int:
             "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (user_id,)
         ) as cur:
             return (await cur.fetchone())[0]
+
+
+# ── Stock ─────────────────────────────────────────────────────────────────────
+
+async def add_stock_items(service_id: str, items: list[str], label: str = None) -> int:
+    """Insert multiple stock items. Returns count added."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        count = 0
+        for content in items:
+            content = content.strip()
+            if content:
+                await db.execute(
+                    "INSERT INTO stock (service_id, content, label) VALUES (?, ?, ?)",
+                    (service_id, content, label)
+                )
+                count += 1
+        await db.commit()
+        return count
+
+
+async def take_stock_item(service_id: str, order_id: int) -> dict | None:
+    """
+    Atomically grab one undelivered item for the service and mark it delivered.
+    Returns the item dict or None if stock is empty.
+    """
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Pick the oldest available item
+        async with db.execute("""
+            SELECT id, content, label FROM stock
+            WHERE service_id = ? AND delivered = 0
+            ORDER BY added_at ASC LIMIT 1
+        """, (service_id,)) as cur:
+            row = await cur.fetchone()
+
+        if not row:
+            return None
+
+        item = dict(row)
+        await db.execute("""
+            UPDATE stock
+            SET delivered = 1, order_id = ?, delivered_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND delivered = 0
+        """, (order_id, item["id"]))
+        await db.commit()
+        return item
+
+
+async def get_stock_levels() -> list[dict]:
+    """Returns available stock count per service_id."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT service_id,
+                   COUNT(*) FILTER (WHERE delivered = 0) AS available,
+                   COUNT(*) FILTER (WHERE delivered = 1) AS delivered
+            FROM stock
+            GROUP BY service_id
+            ORDER BY service_id
+        """) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_stock_level(service_id: str) -> int:
+    """Returns available item count for one service."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM stock WHERE service_id = ? AND delivered = 0",
+            (service_id,)
+        ) as cur:
+            return (await cur.fetchone())[0]
+
+
+async def take_stock_items_multi(service_id: str, order_id: int, qty: int) -> list[dict]:
+    """
+    Atomically grab `qty` undelivered items for the service.
+    Returns list of item dicts (may be shorter than qty if stock runs out).
+    """
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT id, content, label FROM stock
+            WHERE service_id = ? AND delivered = 0
+            ORDER BY added_at ASC LIMIT ?
+        """, (service_id, qty)) as cur:
+            rows = await cur.fetchall()
+
+        items = [dict(r) for r in rows]
+        for item in items:
+            await db.execute("""
+                UPDATE stock
+                SET delivered = 1, order_id = ?, delivered_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND delivered = 0
+            """, (order_id, item["id"]))
+        await db.commit()
+        return items
+
+
+async def get_stock_levels_dict() -> dict:
+    """Returns {service_id: available_count} for all services with stock."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("""
+            SELECT service_id, COUNT(*) as cnt
+            FROM stock WHERE delivered = 0
+            GROUP BY service_id
+        """) as cur:
+            rows = await cur.fetchall()
+            return {row[0]: row[1] for row in rows}
