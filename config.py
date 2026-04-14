@@ -130,6 +130,19 @@ SERVICES: dict = {
         "price": 10.00,
         "delivery": {"en": "Within 24h", "es": "En menos de 24h"},
     },
+     # ── CapCut ────────────────────────────────────────────
+    "capcut_1m": {
+        "id": "capcut_1m", "group": "capcutt",
+        "name": "CapCut Pro – 1 Month",
+        "emoji": "🎬",
+        "description": {
+            "en": "• CapCut Pro Month plan\n• All premium templates & AI tools\n• 1 month access",
+            "es": "• Plan Mensual CapCut Pro\n• Todas las plantillas premium y herramientas IA\n•  1 mes de acceso",
+        },
+        "price": 1.50,
+        "delivery": {"en": "Within 24h", "es": "En menos de 24h"},
+    },
+
 
     # ── Adobe ─────────────────────────────────────────────
     "adobe_4m": {
