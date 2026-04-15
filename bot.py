@@ -251,6 +251,10 @@ def build_application() -> Application:
     # ── Orders ────────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(my_orders,              pattern=r"^my_orders$"))
     app.add_handler(CallbackQueryHandler(cancel_order,           pattern=r"^cancel_\d+$"))
+    # Standalone fallback for stale cancel_payer_id / cancel_topup buttons
+    # (pressed after conversation already ended — just show main menu)
+    app.add_handler(CallbackQueryHandler(cancel_binance_id,      pattern=r"^cancel_payer_id$"))
+    app.add_handler(CallbackQueryHandler(cancel_topup,           pattern=r"^cancel_topup$"))
 
     # ── Balance / Top-Up ─────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_balance,            pattern=r"^balance$"))

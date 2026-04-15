@@ -271,18 +271,23 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def cancel_binance_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    lang = context.user_data.pop("bp_lang", "en")
-    for k in ("bp_order_id", "bp_service_id", "bp_item_type", "bp_qty"):
+    """Cancel while still in step 1 (before payer ID was submitted)."""
+    lang     = context.user_data.pop("bp_lang", "en")
+    order_id = context.user_data.pop("bp_order_id", None)   # pop BEFORE the loop
+    for k in ("bp_service_id", "bp_item_type", "bp_qty"):
         context.user_data.pop(k, None)
-    # Cancel any pending order created before payer ID was sent
-    order_id = context.user_data.pop("bp_order_id", None)
+
     if order_id:
         await db.update_order_status(order_id, "cancelled", admin_note="Cancelled by user (step 1)")
+
     text = t("cancelled", lang)
     kb   = main_menu_kb(lang)
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=kb)
+        try:
+            await update.callback_query.edit_message_text(text, reply_markup=kb)
+        except Exception:
+            await update.callback_query.message.reply_text(text, reply_markup=kb)
     else:
         await update.message.reply_text(text, reply_markup=kb)
     return ConversationHandler.END
@@ -452,33 +457,47 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ── Cancel Order ──────────────────────────────────────────────────────────────
 
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
+    """
+    Callback: cancel_<order_id>
+    Cancels a pending order and returns user to main menu.
+    NOTE: query.answer() is called EXACTLY ONCE to avoid Telegram double-answer error.
+    """
+    query    = update.callback_query
+    order_id = int(query.data.split("_")[1])
+    order    = await db.get_order(order_id)
+    lang     = await db.get_user_lang(query.from_user.id)
+
+    # ── Guard: order doesn't exist or belongs to someone else ────────────────
+    if not order or order["user_id"] != query.from_user.id:
+        await query.answer(
+            "Order not found." if lang == "en" else "Pedido no encontrado.",
+            show_alert=True
+        )
+        return
+
+    # ── Guard: already paid or delivered ─────────────────────────────────────
+    if order["status"] not in ("pending",):
+        await query.answer(
+            "This order can't be cancelled." if lang == "en"
+            else "Este pedido ya no se puede cancelar.",
+            show_alert=True
+        )
+        return
+
+    # ── Cancel in DB (monitor stops itself on next poll when status != pending) ─
+    await db.update_order_status(order_id, "cancelled", admin_note="Cancelled by user")
+
+    # ── Acknowledge button press ──────────────────────────────────────────────
     await query.answer()
 
-    order_id = int(query.data.split("_")[1])
-    order = await db.get_order(order_id)
-    lang  = await db.get_user_lang(query.from_user.id)
+    # ── Show cancellation message + main menu ─────────────────────────────────
+    if lang == "en":
+        text = f"❌ <b>Order #{order_id} cancelled.</b>\n\nYou've been returned to the main menu."
+    else:
+        text = f"❌ <b>Pedido #{order_id} cancelado.</b>\n\nFuiste devuelto al menú principal."
 
-    if not order or order["user_id"] != query.from_user.id:
-        await query.answer("Order not found.", show_alert=True)
-        return
-    if order["status"] not in ("pending",):
-        await query.answer("This order can't be cancelled." if lang == "en"
-                           else "Este pedido ya no se puede cancelar.", show_alert=True)
-        return
-
-    if order.get("payment_proof", "").startswith("BINANCE:"):
-        prepay_id = order["payment_proof"].replace("BINANCE:", "")
-        try:
-            from payments.binance_pay import close_order
-            await close_order(prepay_id)
-        except Exception:
-            pass
-
-    await db.update_order_status(order_id, "cancelled",
-                                  admin_note="Cancelled by user")
-    await query.edit_message_text(
-        f"❌ <b>{'Order' if lang=='en' else 'Pedido'} #{order_id} {'cancelled' if lang=='en' else 'cancelado'}.</b>",
-        parse_mode="HTML",
-        reply_markup=main_menu_kb(lang)
-    )
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(lang))
+    except Exception:
+        # Message might be too old to edit — send a new one
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb(lang))
