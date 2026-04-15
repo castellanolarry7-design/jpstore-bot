@@ -153,13 +153,28 @@ async def monitor_binance_pay_payment(
             print(f"[BinanceMonitor] Fetch error: {e}")
             continue
 
-        # Match by amount (unique amount is sufficient for confirmation)
+        # Match by payer ID (primary) + amount (secondary)
+        # Payer ID is the user's Binance numeric account ID — unique and reliable.
+        # Amount just needs to match the exact order price (no unique cents needed).
         for tx in transactions:
-            amount_match = abs(tx["amount"] - expected_amount) <= TOLERANCE
+            amount_ok = abs(tx["amount"] - expected_amount) <= TOLERANCE
+            if not amount_ok:
+                continue
 
-            if amount_match:
+            # Verify payer ID if Binance returned it in the transaction
+            tx_payer_id = tx["payer_id"].strip().lower()
+            if tx_payer_id:
+                # Both the stored ID and the tx ID must match
+                if payer_id_normalized not in tx_payer_id and tx_payer_id not in payer_id_normalized:
+                    print(f"[BinanceMonitor] ⚠️ Amount match but payer ID mismatch "
+                          f"(expected: {payer_id_normalized}, got: {tx_payer_id}) — skipping")
+                    continue
+            # If Binance didn't return payer_id in API response, amount match is sufficient
+
+            if True:  # all checks passed
                 tx_id = tx["transaction_id"]
-                print(f"[BinanceMonitor] ✅ Match por Monto! Order #{order_id} | TX: {tx_id}")
+                print(f"[BinanceMonitor] ✅ Match por ID+Monto! Order #{order_id} | "
+                      f"payer: {tx_payer_id or 'N/A'} | TX: {tx_id}")
 
                 await db.update_order_proof(order_id, f"BPAY:{tx_id}")
                 await db.update_order_status(

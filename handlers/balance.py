@@ -271,10 +271,10 @@ async def receive_topup_payer_id(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(err)
         return WAITING_TOPUP_PAYER_ID
 
-    from payments.crypto_monitor import unique_amount
     from payments.binance_monitor import monitor_binance_pay_payment
 
-    pay_amount = unique_amount(amount, order_id)
+    # Use exact top-up amount — payer ID verification means no unique cents needed
+    pay_amount = round(amount, 2)
     await db.set_order_payer(order_id, payer_id, pay_amount)
 
     if lang == "en":

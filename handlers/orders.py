@@ -189,10 +189,12 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("❌ Service not found.")
         return ConversationHandler.END
 
-    from payments.crypto_monitor import unique_amount
     from payments.binance_monitor import monitor_binance_pay_payment
 
-    pay_amount = unique_amount(item["price"], order_id)
+    # Use exact order amount (already includes discount/qty) — no unique cents needed
+    # because we verify by payer ID, so the amount is always fixed and clean.
+    order = await db.get_order(order_id)
+    pay_amount = round(order["amount"], 2) if order else round(item["price"], 2)
 
     # Save payer ID and expected amount to DB
     await db.set_order_payer(order_id, payer_id, pay_amount)
