@@ -564,19 +564,22 @@ async def admin_stock_receive_creds(update: Update, context: ContextTypes.DEFAUL
     added = await db.add_stock_items(service_id, items)
     total = await db.get_stock_level(service_id)
 
+    context.user_data.pop("stock_add_service_id", None)
+    context.user_data.pop("stock_add_service_name", None)
     await update.message.reply_text(
-        f"✅ <b>{added} credencial(es) agregada(s)</b>\n\n"
+        f"✅ <b>{added} credencial(es) guardada(s)</b>\n\n"
         f"Servicio: <b>{svc_name}</b>\n"
-        f"📊 Total disponible: <b>{total}</b>\n\n"
-        "Puedes enviar más o pulsar el botón para terminar.",
+        f"📊 Total disponible: <b>{total}</b>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📦 Ver stock de este servicio",
+            [InlineKeyboardButton(f"➕ Agregar más a {svc_name[:20]}",
+                                  callback_data=f"admin_stock_add_{service_id}")],
+            [InlineKeyboardButton("📊 Ver stock de este servicio",
                                   callback_data=f"admin_stock_items_{service_id}")],
             [InlineKeyboardButton("📦 Gestión de Stock", callback_data="admin_stock")],
         ])
     )
-    return WAITING_STOCK_ADD_CREDS   # stay open to add more
+    return ConversationHandler.END   # close conversation — click "Agregar más" to reopen
 
 
 async def admin_stock_add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

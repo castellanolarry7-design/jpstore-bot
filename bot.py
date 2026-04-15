@@ -100,11 +100,14 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_stock_receive_creds),
                 CommandHandler("cancelar", admin_stock_add_cancel),
                 CommandHandler("cancel",   admin_stock_add_cancel),
+                # Allow pressing the stock menu button to exit the conversation
+                CallbackQueryHandler(admin_stock_add_cancel, pattern=r"^admin_stock$"),
             ]
         },
         fallbacks=[
             CommandHandler("cancelar", admin_stock_add_cancel),
             CommandHandler("cancel",   admin_stock_add_cancel),
+            CallbackQueryHandler(admin_stock_add_cancel, pattern=r"^admin_stock$"),
         ],
         allow_reentry=True,
     )
@@ -121,11 +124,13 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_payer_id),
                 CommandHandler("cancel",   cancel_binance_id),
                 CommandHandler("cancelar", cancel_binance_id),
+                CallbackQueryHandler(cancel_binance_id, pattern=r"^cancel_payer_id$"),
             ]
         },
         fallbacks=[
             CommandHandler("cancel",   cancel_binance_id),
             CommandHandler("cancelar", cancel_binance_id),
+            CallbackQueryHandler(cancel_binance_id, pattern=r"^cancel_payer_id$"),
         ],
         allow_reentry=True,
     )
@@ -179,11 +184,13 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_topup_payer_id),
                 CommandHandler("cancel",   cancel_topup),
                 CommandHandler("cancelar", cancel_topup),
+                CallbackQueryHandler(cancel_topup, pattern=r"^cancel_topup$"),
             ]
         },
         fallbacks=[
             CommandHandler("cancel",   cancel_topup),
             CommandHandler("cancelar", cancel_topup),
+            CallbackQueryHandler(cancel_topup, pattern=r"^cancel_topup$"),
         ],
         allow_reentry=True,
     )

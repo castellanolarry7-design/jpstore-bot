@@ -235,18 +235,20 @@ async def initiate_topup_binance(update: Update, context: ContextTypes.DEFAULT_T
             f"🟠 <b>Binance Pay Top-Up — Step 1 of 2</b>\n\n"
             f"💰 Amount: <b>${amount:.2f} USDT</b>\n\n"
             "Please send us <b>your Binance Pay ID</b> (numeric ID of your account).\n\n"
-            "📍 <i>Find it: Binance App → Pay → My QR → number below the QR code</i>\n\n"
-            "Type /cancel to abort."
+            "📍 <i>Binance App → Pay → My QR → number below the QR code</i>"
         )
     else:
         msg = (
             f"🟠 <b>Recarga Binance Pay — Paso 1 de 2</b>\n\n"
             f"💰 Monto: <b>${amount:.2f} USDT</b>\n\n"
             "Envíanos <b>tu ID de Binance Pay</b> (número de tu cuenta).\n\n"
-            "📍 <i>Binance App → Pay → Mi QR → número debajo del código QR</i>\n\n"
-            "Escribe /cancelar para cancelar."
+            "📍 <i>Binance App → Pay → Mi QR → número debajo del código QR</i>"
         )
-    await query.edit_message_text(msg, parse_mode="HTML")
+    cancel_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ " + ("Cancel" if lang == "en" else "Cancelar"),
+                             callback_data="cancel_topup")
+    ]])
+    await query.edit_message_text(msg, parse_mode="HTML", reply_markup=cancel_kb)
     return WAITING_TOPUP_PAYER_ID
 
 
@@ -337,7 +339,15 @@ async def receive_topup_payer_id(update: Update, context: ContextTypes.DEFAULT_T
 
 async def cancel_topup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     lang = context.user_data.pop("topup_bp_lang", "en")
-    for k in ("topup_bp_order_id", "topup_bp_amount"):
-        context.user_data.pop(k, None)
-    await update.message.reply_text(t("cancelled", lang), reply_markup=main_menu_kb(lang))
+    order_id = context.user_data.pop("topup_bp_order_id", None)
+    context.user_data.pop("topup_bp_amount", None)
+    if order_id:
+        await db.update_order_status(order_id, "cancelled", admin_note="Cancelled by user (topup step 1)")
+    text = t("cancelled", lang)
+    kb   = main_menu_kb(lang)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, reply_markup=kb)
     return ConversationHandler.END

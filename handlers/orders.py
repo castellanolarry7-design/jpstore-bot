@@ -56,23 +56,26 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
                 f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
                 f"💵 ${total_price:.2f} USDT{disc_note}\n\n"
-                "Before showing the payment address, please send us "
-                "<b>your Binance Pay ID</b> (the numeric ID of your account).\n\n"
-                "📍 <i>Find it in Binance App → Pay → My QR → your ID number below the QR</i>\n\n"
-                "Type /cancel to abort."
+                "Please send us <b>your Binance Pay ID</b> "
+                "(the numeric ID of your account).\n\n"
+                "📍 <i>Binance App → Pay → My QR → number below the QR code</i>"
             )
         else:
             msg = (
                 f"🟠 <b>Binance Pay — Paso 1 de 2</b>\n\n"
                 f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
                 f"💵 ${total_price:.2f} USDT{disc_note}\n\n"
-                "Antes de mostrarte la dirección de pago, envíanos "
-                "<b>tu ID de Binance Pay</b> (el número de tu cuenta).\n\n"
-                "📍 <i>Encuéntralo en Binance App → Pay → Mi QR → el número bajo el código QR</i>\n\n"
-                "Escribe /cancelar para cancelar."
+                "Envíanos <b>tu ID de Binance Pay</b> "
+                "(el número de tu cuenta).\n\n"
+                "📍 <i>Binance App → Pay → Mi QR → número bajo el código QR</i>"
             )
 
-        await query.edit_message_text(msg, parse_mode="HTML")
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        cancel_kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ " + ("Cancel" if lang == "en" else "Cancelar"),
+                                 callback_data="cancel_payer_id")
+        ]])
+        await query.edit_message_text(msg, parse_mode="HTML", reply_markup=cancel_kb)
         return WAITING_PAYER_ID
 
     # ── TRC20 / BEP20 — auto-monitored ───────────────────────────────────────
@@ -267,9 +270,19 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def cancel_binance_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     lang = context.user_data.pop("bp_lang", "en")
-    for k in ("bp_order_id", "bp_service_id", "bp_item_type"):
+    for k in ("bp_order_id", "bp_service_id", "bp_item_type", "bp_qty"):
         context.user_data.pop(k, None)
-    await update.message.reply_text(t("cancelled", lang), reply_markup=main_menu_kb(lang))
+    # Cancel any pending order created before payer ID was sent
+    order_id = context.user_data.pop("bp_order_id", None)
+    if order_id:
+        await db.update_order_status(order_id, "cancelled", admin_note="Cancelled by user (step 1)")
+    text = t("cancelled", lang)
+    kb   = main_menu_kb(lang)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
+    else:
+        await update.message.reply_text(text, reply_markup=kb)
     return ConversationHandler.END
 
 
