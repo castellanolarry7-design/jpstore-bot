@@ -210,4 +210,20 @@ METHODS: dict = {
         "name": "Grok Unlimited Monthly Accounts",
         "emoji": "♾️",
         "description": {
-            
+            "en": (
+                "• Unlimited Grok accounts for the current month\n"
+                "• Bulk access – create as many as you need\n"
+                "• Full method + automation guide\n"
+                "• Valid until end of month"
+            ),
+            "es": (
+                "• Cuentas Grok ilimitadas durante el mes actual\n"
+                "• Acceso masivo – crea cuantas necesites\n"
+                "• Método completo + guía de automatización\n"
+                "• Válido hasta fin de mes"
+            ),
+        },
+        "price": 70.00,
+        "delivery": {"en": "Instant", "es": "Inmediata"},
+    },
+}
