@@ -18,7 +18,7 @@ from database import init_db
 # Handlers
 from handlers.start    import start, show_language_selector, set_language, support
 from handlers.catalog  import (show_catalog, show_service, show_payment_methods,
-                                show_quantity_selector, select_quantity)
+                                show_quantity_selector, qty_control, select_quantity)
 from handlers.methods  import (show_methods, show_method_detail,
                                 show_method_payment, initiate_method_payment)
 from handlers.referrals import show_referrals
@@ -237,6 +237,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(show_catalog,           pattern=r"^catalog$"))
     app.add_handler(CallbackQueryHandler(show_service,           pattern=r"^service_.+$"))
     app.add_handler(CallbackQueryHandler(show_quantity_selector, pattern=r"^qtysel_.+$"))
+    app.add_handler(CallbackQueryHandler(qty_control,            pattern=r"^qtyctrl_.+_\d+$"))
     app.add_handler(CallbackQueryHandler(select_quantity,        pattern=r"^qty_.+_\d+$"))
     app.add_handler(CallbackQueryHandler(show_payment_methods,   pattern=r"^buy_.+$"))
     app.add_handler(CallbackQueryHandler(initiate_payment,       pattern=r"^pay_(trc20|bep20)_.+$"))

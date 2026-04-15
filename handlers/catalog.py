@@ -8,7 +8,7 @@ import database as db
 from strings import t
 from utils.keyboards import (
     catalog_kb, service_detail_kb, payment_method_kb,
-    quantity_kb, stock_badge,
+    qty_control_kb, stock_badge,
 )
 from utils.delivery import apply_discount
 
@@ -55,12 +55,33 @@ async def show_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
+def _qty_header(svc: dict, qty: int, stock_qty: int, lang: str) -> str:
+    """Builds the text shown above the +/- selector."""
+    _, total, rate = apply_discount(svc["price"], qty)
+    disc_note = f" <i>(-{int(rate*100)}%)</i>" if rate > 0 else ""
+    if lang == "en":
+        return (
+            f"{svc['emoji']} <b>{svc['name']}</b>\n"
+            f"💵 Unit price: <b>${svc['price']:.2f} USDT</b>  "
+            f"📦 Stock: <b>{stock_qty}</b>\n\n"
+            f"🛒 Quantity: <b>{qty}</b>  →  Total: <b>${total:.2f} USDT</b>{disc_note}"
+        )
+    else:
+        return (
+            f"{svc['emoji']} <b>{svc['name']}</b>\n"
+            f"💵 Precio unitario: <b>${svc['price']:.2f} USDT</b>  "
+            f"📦 Stock: <b>{stock_qty}</b>\n\n"
+            f"🛒 Cantidad: <b>{qty}</b>  →  Total: <b>${total:.2f} USDT</b>{disc_note}"
+        )
+
+
 async def show_quantity_selector(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Callback: qtysel_<service_id> — shows quantity buttons with discount labels."""
+    """Callback: qtysel_<service_id> — shows +/- quantity selector starting at 1."""
     query = update.callback_query
     await query.answer()
 
-    service_id = query.data.split("_", 1)[1]
+    # service_id may contain underscores (e.g. gemini_pro_1m)
+    service_id = query.data[len("qtysel_"):]
     svc = SERVICES.get(service_id)
     if not svc:
         await query.answer("Service not found.", show_alert=True)
@@ -77,39 +98,51 @@ async def show_quantity_selector(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    if lang == "en":
-        header = (
-            f"{svc['emoji']} <b>{svc['name']}</b>\n"
-            f"💵 Unit price: <b>${svc['price']:.2f} USDT</b>\n"
-            f"📦 Available: <b>{stock_qty}</b>\n\n"
-            "🛒 <b>How many do you want?</b>\n\n"
-            "🟡 <b>6+</b> units → <b>10% discount</b>\n"
-            "🟢 <b>16+</b> units → <b>15% discount</b>"
-        )
-    else:
-        header = (
-            f"{svc['emoji']} <b>{svc['name']}</b>\n"
-            f"💵 Precio unitario: <b>${svc['price']:.2f} USDT</b>\n"
-            f"📦 Disponibles: <b>{stock_qty}</b>\n\n"
-            "🛒 <b>¿Cuántos quieres?</b>\n\n"
-            "🟡 <b>6+</b> unidades → <b>10% de descuento</b>\n"
-            "🟢 <b>16+</b> unidades → <b>15% de descuento</b>"
-        )
-
+    qty = 1
     await query.edit_message_text(
-        header, parse_mode="HTML",
-        reply_markup=quantity_kb(service_id, svc["price"], stock_qty, lang)
+        _qty_header(svc, qty, stock_qty, lang),
+        parse_mode="HTML",
+        reply_markup=qty_control_kb(service_id, svc["price"], qty, stock_qty, lang)
     )
 
 
-async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Callback: qty_<service_id>_<qty> — stores quantity and shows payment methods."""
+async def qty_control(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: qtyctrl_<service_id>_<qty> — updates the +/- display when user presses ➕/➖."""
     query = update.callback_query
     await query.answer()
 
-    parts      = query.data.split("_", 2)   # ['qty', service_id, qty]
-    service_id = parts[1]
-    qty        = int(parts[2])
+    # Strip prefix then rsplit on last _ to get qty (service_id may contain _)
+    data       = query.data[len("qtyctrl_"):]
+    service_id, qty_str = data.rsplit("_", 1)
+    qty        = int(qty_str)
+
+    svc = SERVICES.get(service_id)
+    if not svc:
+        return
+
+    lang      = await db.get_user_lang(query.from_user.id)
+    stock_qty = await db.get_stock_level(service_id)
+    qty       = max(1, min(qty, stock_qty))
+
+    try:
+        await query.edit_message_text(
+            _qty_header(svc, qty, stock_qty, lang),
+            parse_mode="HTML",
+            reply_markup=qty_control_kb(service_id, svc["price"], qty, stock_qty, lang)
+        )
+    except Exception:
+        pass  # ignore "message not modified" if user spam-clicks same value
+
+
+async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: qty_<service_id>_<qty> — user pressed the Buy button → show payment methods."""
+    query = update.callback_query
+    await query.answer()
+
+    # Strip prefix then rsplit to separate qty (service_id may contain _)
+    data       = query.data[len("qty_"):]
+    service_id, qty_str = data.rsplit("_", 1)
+    qty        = int(qty_str)
 
     svc = SERVICES.get(service_id)
     if not svc:

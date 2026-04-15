@@ -52,50 +52,77 @@ def catalog_kb(lang: str = "en", stock_levels: dict = None) -> InlineKeyboardMar
 
 
 def service_detail_kb(service_id: str, lang: str = "en", stock_qty: int = -1) -> InlineKeyboardMarkup:
-    """
-    If stock_qty >= 0, shows a "Select quantity" button instead of direct buy.
-    If stock_qty < 0 (unknown), shows direct buy.
-    """
     rows = []
     if stock_qty == 0:
-        # Out of stock — disable buy, show contact support
         rows.append([InlineKeyboardButton(
             "🔴 " + ("Out of stock" if lang == "en" else "Sin stock"),
             callback_data="noop"
         )])
     elif stock_qty > 0:
+        # Route through quantity selector (+/- interface)
         rows.append([InlineKeyboardButton(
-            "🛒 " + ("Buy now" if lang == "en" else "Comprar ahora"),
-            callback_data=f"buy_{service_id}"
+            "🛒 " + ("Buy — select quantity" if lang == "en" else "Comprar — elegir cantidad"),
+            callback_data=f"qtysel_{service_id}"
         )])
     else:
-        # No stock info — direct buy
+        # No stock info — direct buy, qty=1
         rows.append([InlineKeyboardButton(t("btn_buy_now", lang), callback_data=f"buy_{service_id}")])
     rows.append([InlineKeyboardButton(t("btn_to_catalog", lang), callback_data="catalog")])
     return InlineKeyboardMarkup(rows)
 
 
-def quantity_kb(service_id: str, unit_price: float, max_stock: int, lang: str = "en") -> InlineKeyboardMarkup:
-    """Quantity selector with discount labels."""
+def qty_control_kb(service_id: str, unit_price: float, qty: int,
+                   max_stock: int, lang: str = "en") -> InlineKeyboardMarkup:
+    """
+    +/- quantity selector.
+    Row 1: ➖  [qty]  ➕
+    Row 2: 🛒 Buy xN — $XX.XX  (with discount label if applicable)
+    Row 3: discount hint when close to next tier
+    Row 4: ◀️ Back
+    """
     from utils.delivery import apply_discount
+    _, total, rate = apply_discount(unit_price, qty)
 
-    options = [1, 2, 3, 5, 10, 20]
-    rows = []
-    row = []
-    for qty in options:
-        if qty > max_stock:
-            continue
-        _, total, rate = apply_discount(unit_price, qty)
-        disc_label = f" (-{int(rate*100)}%)" if rate > 0 else ""
-        label = f"{qty}x = ${total:.2f}{disc_label}"
-        row.append(InlineKeyboardButton(label, callback_data=f"qty_{service_id}_{qty}"))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+    disc_label = f" (-{int(rate*100)}%)" if rate > 0 else ""
+    if lang == "en":
+        buy_label = f"🛒 Buy x{qty} — ${total:.2f} USDT{disc_label}"
+    else:
+        buy_label = f"🛒 Comprar x{qty} — ${total:.2f} USDT{disc_label}"
+
+    # Hint about next discount tier
+    hint = None
+    if rate == 0 and max_stock >= 6:
+        gap = 6 - qty
+        if gap > 0:
+            hint = (f"💡 +{gap} more → 10% off" if lang == "en"
+                    else f"💡 +{gap} más → 10% descuento")
+    elif rate < 0.15 and max_stock >= 16:
+        gap = 16 - qty
+        if gap > 0:
+            hint = (f"💡 +{gap} more → 15% off" if lang == "en"
+                    else f"💡 +{gap} más → 15% descuento")
+
+    # ➖ button goes to max(1, qty-1), ➕ goes to min(max_stock, qty+1)
+    prev_qty = max(1, qty - 1)
+    next_qty = min(max_stock, qty + 1)
+
+    rows = [
+        [
+            InlineKeyboardButton("➖", callback_data=f"qtyctrl_{service_id}_{prev_qty}"),
+            InlineKeyboardButton(str(qty),  callback_data="noop"),
+            InlineKeyboardButton("➕", callback_data=f"qtyctrl_{service_id}_{next_qty}"),
+        ],
+        [InlineKeyboardButton(buy_label, callback_data=f"qty_{service_id}_{qty}")],
+    ]
+    if hint:
+        rows.append([InlineKeyboardButton(hint, callback_data="noop")])
     rows.append([InlineKeyboardButton(t("btn_back", lang), callback_data=f"service_{service_id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def quantity_kb(service_id: str, unit_price: float, max_stock: int, lang: str = "en") -> InlineKeyboardMarkup:
+    """Legacy fixed-options selector — kept for backward compat."""
+    return qty_control_kb(service_id, unit_price, 1, max_stock, lang)
 
 
 def payment_method_kb(service_id: str, lang: str = "en") -> InlineKeyboardMarkup:
