@@ -179,7 +179,37 @@ async def monitor_binance_pay_payment(
                     except Exception:
                         pass
 
-                # ── Auto-deliver from stock ────────────────────────────────
+                # ── Topup orders: credit balance, skip auto_deliver ────────
+                if order.get("item_type") == "topup":
+                    topup_amount = order["amount"]
+                    await db.add_credits(user_id, topup_amount)
+                    await db.update_order_status(
+                        order_id, "delivered",
+                        admin_note=f"Topup auto-credited via Binance Pay | TX: {tx_id}"
+                    )
+                    user        = await db.get_user(user_id)
+                    new_balance = float(user["credits"]) if user else topup_amount
+                    if lang == "en":
+                        topup_msg = (
+                            f"✅ <b>Balance added!</b>\n\n"
+                            f"💰 <b>+${topup_amount:.2f} USDT</b> credited to your wallet.\n"
+                            f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                            "You can now use your balance to buy any service 🎉"
+                        )
+                    else:
+                        topup_msg = (
+                            f"✅ <b>¡Saldo añadido!</b>\n\n"
+                            f"💰 <b>+${topup_amount:.2f} USDT</b> añadidos a tu billetera.\n"
+                            f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
+                            "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
+                        )
+                    try:
+                        await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
+                    except Exception:
+                        pass
+                    return
+
+                # ── Regular service/method: auto-deliver from stock ────────
                 from utils.delivery import auto_deliver
                 service_id      = order["service_id"]
                 stock_delivered = await auto_deliver(
@@ -189,10 +219,6 @@ async def monitor_binance_pay_payment(
                 if not stock_delivered:
                     user = await db.get_user(user_id)
                     await notify_admins_new_order(bot, order, user)
-
-                # Topup orders → add credits to user balance
-                if order.get("item_type") == "topup":
-                    await db.add_credits(user_id, order["amount"])
 
                 # Referral credit
                 from handlers.referrals import handle_first_purchase_referral

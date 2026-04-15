@@ -32,6 +32,9 @@ BINANCE_PAY_ENABLED: bool = True  # Siempre habilitado (pago manual por ID)
 DATABASE_URL:  str = os.getenv("DATABASE_URL", "")
 DATABASE_PATH: str = os.getenv("DATABASE_PATH", "store.db")
 
+# ── Top-Up amounts (USD) ─────────────────────────────────
+TOPUP_AMOUNTS: list[float] = [5.0, 10.0, 20.0, 50.0]
+
 # ── Admin stock password ──────────────────────────────────
 # Set this in your .env / Railway variables as ADMIN_PASSWORD
 ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
