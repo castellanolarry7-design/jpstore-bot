@@ -83,6 +83,21 @@ else:
 
 async def _create_tables_pg(conn) -> None:
     await conn.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id              SERIAL PRIMARY KEY,
+            service_id      TEXT UNIQUE NOT NULL,
+            name            TEXT NOT NULL,
+            emoji           TEXT DEFAULT '📦',
+            price           REAL NOT NULL,
+            description_en  TEXT DEFAULT '',
+            description_es  TEXT DEFAULT '',
+            delivery_en     TEXT DEFAULT 'Instant delivery',
+            delivery_es     TEXT DEFAULT 'Entrega inmediata',
+            is_active       INTEGER DEFAULT 1,
+            added_at        TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id         BIGINT PRIMARY KEY,
             username        TEXT,
@@ -164,6 +179,21 @@ async def _create_tables_pg(conn) -> None:
 
 
 async def _create_tables_sqlite(db) -> None:
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id      TEXT UNIQUE NOT NULL,
+            name            TEXT NOT NULL,
+            emoji           TEXT DEFAULT '📦',
+            price           REAL NOT NULL,
+            description_en  TEXT DEFAULT '',
+            description_es  TEXT DEFAULT '',
+            delivery_en     TEXT DEFAULT 'Instant delivery',
+            delivery_es     TEXT DEFAULT 'Entrega inmediata',
+            is_active       INTEGER DEFAULT 1,
+            added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id         INTEGER PRIMARY KEY,
@@ -260,6 +290,83 @@ async def init_db() -> None:
     else:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await _create_tables_sqlite(db)
+    # Warm up the in-memory products cache
+    await refresh_products_cache()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DYNAMIC PRODUCTS CACHE (DB-backed, merged with static SERVICES at runtime)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_products_cache: dict = {}   # service_id → SERVICES-format dict
+
+
+async def refresh_products_cache() -> None:
+    """Load active products from DB into the in-memory cache."""
+    global _products_cache
+    rows = await _fetch("SELECT * FROM products WHERE is_active = 1 ORDER BY added_at ASC")
+    _products_cache = {}
+    for r in rows:
+        _products_cache[r["service_id"]] = {
+            "id":          r["service_id"],
+            "name":        r["name"],
+            "emoji":       r["emoji"],
+            "price":       float(r["price"]),
+            "description": {
+                "en": r.get("description_en") or "",
+                "es": r.get("description_es") or "",
+            },
+            "delivery": {
+                "en": r.get("delivery_en") or "Instant delivery",
+                "es": r.get("delivery_es") or "Entrega inmediata",
+            },
+            "_db_id": r["id"],   # kept for deletion
+        }
+
+
+def get_cached_db_products() -> dict:
+    """Sync read of the in-memory products cache (always fresh after any create/delete)."""
+    return dict(_products_cache)
+
+
+async def create_db_product(
+    name: str, emoji: str, price: float,
+    desc_en: str, desc_es: str,
+    delivery_en: str, delivery_es: str,
+) -> int:
+    """Create a new dynamic product and refresh the cache. Returns the new DB row id."""
+    import re, time as _time
+    base_sid = re.sub(r"[^a-z0-9]+", "_", name.lower().strip()).strip("_")[:25] or "product"
+    service_id = base_sid
+    # Avoid collision with existing service_ids (static OR DB)
+    from config import SERVICES, METHODS
+    taken = set(SERVICES) | set(METHODS) | set(_products_cache)
+    suffix = 2
+    while service_id in taken:
+        service_id = f"{base_sid}_{suffix}"[:30]
+        suffix += 1
+    new_id = await _insert_returning("""
+        INSERT INTO products (service_id, name, emoji, price, description_en, description_es,
+                              delivery_en, delivery_es)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id
+    """, service_id, name, emoji, price, desc_en, desc_es, delivery_en, delivery_es)
+    await refresh_products_cache()
+    return new_id
+
+
+async def delete_db_product(db_id: int) -> bool:
+    """Soft-delete a dynamic product by DB row id. Returns True if deleted."""
+    row = await _fetchrow("SELECT id FROM products WHERE id=$1 AND is_active=1", db_id)
+    if not row:
+        return False
+    await _exec("UPDATE products SET is_active=0 WHERE id=$1", db_id)
+    await refresh_products_cache()
+    return True
+
+
+async def get_all_db_products() -> list[dict]:
+    """Return raw product rows (all active) for admin listing."""
+    return await _fetch("SELECT * FROM products WHERE is_active=1 ORDER BY added_at ASC")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -403,10 +510,12 @@ async def get_user_orders(user_id: int) -> list[dict]:
 
 
 async def get_pending_orders() -> list[dict]:
+    """Return orders that need admin attention: pending payment OR paid but not yet delivered."""
     return await _fetch("""
         SELECT o.*, u.username, u.first_name
         FROM orders o JOIN users u ON o.user_id = u.user_id
-        WHERE o.status = 'pending' ORDER BY o.created_at ASC
+        WHERE o.status IN ('pending', 'paid') AND o.item_type != 'topup'
+        ORDER BY o.created_at ASC
     """)
 
 
@@ -415,15 +524,61 @@ async def get_stats() -> dict:
     for key, q in [
         ("total_users",      "SELECT COUNT(*) FROM users"),
         ("total_orders",     "SELECT COUNT(*) FROM orders WHERE item_type != 'topup'"),
-        ("pending_orders",   "SELECT COUNT(*) FROM orders WHERE status='pending' AND item_type!='topup'"),
-        ("delivered_orders", "SELECT COUNT(*) FROM orders WHERE status='delivered'"),
+        ("pending_orders",   "SELECT COUNT(*) FROM orders WHERE status IN ('pending','paid') AND item_type!='topup'"),
+        ("delivered_orders", "SELECT COUNT(*) FROM orders WHERE status='delivered' AND item_type!='topup'"),
         ("total_referrals",  "SELECT COUNT(*) FROM referrals"),
     ]:
         stats[key] = await _fetchval(q) or 0
     stats["total_revenue"] = await _fetchval(
         "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' AND item_type!='topup'"
     ) or 0.0
+    # Revenue for last 7 days
+    if _USE_PG:
+        stats["week_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= NOW() - INTERVAL '7 days'"
+        ) or 0.0
+        stats["today_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= NOW() - INTERVAL '1 day'"
+        ) or 0.0
+    else:
+        stats["week_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= datetime('now','-7 days')"
+        ) or 0.0
+        stats["today_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= datetime('now','-1 day')"
+        ) or 0.0
     return stats
+
+
+async def cancel_stale_pending_orders(older_than_minutes: int = 30) -> int:
+    """
+    Cancel pending orders older than `older_than_minutes` that have no monitor watching them
+    (e.g., user opened Binance Pay step 1 then disappeared). Returns count cancelled.
+    """
+    if _USE_PG:
+        rows = await _fetch("""
+            UPDATE orders SET status='cancelled', admin_note='Auto-cancelled: stale pending'
+            WHERE status='pending'
+              AND item_type != 'topup'
+              AND created_at < NOW() - ($1 * INTERVAL '1 minute')
+            RETURNING order_id
+        """, older_than_minutes)
+    else:
+        rows = await _fetch("""
+            SELECT order_id FROM orders
+            WHERE status='pending'
+              AND item_type != 'topup'
+              AND datetime(created_at) < datetime('now', $1)
+        """, f"-{older_than_minutes} minutes")
+        for r in rows:
+            await _exec(
+                "UPDATE orders SET status='cancelled', admin_note='Auto-cancelled: stale pending' "
+                "WHERE order_id=$1", r["order_id"])
+    return len(rows)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

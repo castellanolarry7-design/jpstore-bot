@@ -143,7 +143,7 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         msg_id=query.message.message_id,
     )
 
-    # Launch background blockchain monitor
+    # Launch background blockchain monitor (30-minute window for crypto)
     asyncio.create_task(monitor_crypto_payment(
         bot=context.bot,
         order_id=order_id,
@@ -153,7 +153,7 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         service_name=svc["name"],
         lang=lang,
         qty=qty,
-        timeout_seconds=900,
+        timeout_seconds=1800,
     ))
 
 
@@ -268,6 +268,93 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data.pop(k, None)
 
     return ConversationHandler.END
+
+
+async def initiate_balance_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: pay_balance_<service_id> — deduct credits and auto-deliver."""
+    query = update.callback_query
+    await query.answer()
+
+    # service_id may contain underscores
+    service_id = query.data[len("pay_balance_"):]
+    svc = SERVICES.get(service_id)
+    if not svc:
+        await query.answer("Service not found.", show_alert=True)
+        return
+
+    user_id = query.from_user.id
+    lang    = await db.get_user_lang(user_id)
+
+    from utils.delivery import apply_discount
+    qty = context.user_data.pop("order_qty", 1)
+    unit_disc, total_price, disc_rate = apply_discount(svc["price"], qty)
+
+    # ── Re-check balance at time of purchase ──────────────────────────────────
+    user         = await db.get_user(user_id)
+    user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
+
+    if user_credits < total_price:
+        short = total_price - user_credits
+        err = (
+            f"❌ Insufficient balance.\n"
+            f"You have ${user_credits:.2f} but need ${total_price:.2f} "
+            f"(${short:.2f} short)."
+            if lang == "en" else
+            f"❌ Saldo insuficiente.\n"
+            f"Tienes ${user_credits:.2f} pero necesitas ${total_price:.2f} "
+            f"(faltan ${short:.2f})."
+        )
+        await query.answer(err, show_alert=True)
+        return
+
+    # ── Deduct credits atomically before creating order ───────────────────────
+    await db.use_credits(user_id, total_price)
+
+    # ── Create order ──────────────────────────────────────────────────────────
+    order_id = await db.create_order(user_id, service_id, total_price, "balance")
+    await db.update_order_status(order_id, "paid", admin_note="Paid with wallet balance")
+
+    new_credits = user_credits - total_price
+    qty_label   = f" x{qty}" if qty > 1 else ""
+    disc_note   = (f" (-{int(disc_rate*100)}%)" if disc_rate > 0 else "")
+
+    # ── Auto-deliver from stock ───────────────────────────────────────────────
+    from utils.delivery import auto_deliver
+    stock_delivered = await auto_deliver(
+        context.bot, order_id, service_id, user_id, lang, qty=qty)
+
+    if not stock_delivered:
+        # No stock — admin notified, show "pending delivery" message to user
+        order    = await db.get_order(order_id)
+        user_obj = await db.get_user(user_id)
+        await notify_admins_new_order(context.bot, order, user_obj)
+
+        if lang == "en":
+            text = (
+                f"✅ <b>Order #{order_id} placed!</b>\n\n"
+                f"💳 Paid with wallet balance\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>{disc_note}\n"
+                f"💵 ${total_price:.2f} USDT\n"
+                f"💰 Remaining balance: <b>${new_credits:.2f} USDT</b>\n\n"
+                "We'll deliver within 24 hours ⏱️"
+            )
+        else:
+            text = (
+                f"✅ <b>¡Pedido #{order_id} realizado!</b>\n\n"
+                f"💳 Pagado con saldo de billetera\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>{disc_note}\n"
+                f"💵 ${total_price:.2f} USDT\n"
+                f"💰 Saldo restante: <b>${new_credits:.2f} USDT</b>\n\n"
+                "Entregamos en menos de 24 horas ⏱️"
+            )
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(lang))
+        except Exception:
+            await query.message.reply_text(text, parse_mode="HTML", reply_markup=main_menu_kb(lang))
+
+    # ── Referral credit ───────────────────────────────────────────────────────
+    from handlers.referrals import handle_first_purchase_referral
+    await handle_first_purchase_referral(context.bot, user_id)
 
 
 async def cancel_binance_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

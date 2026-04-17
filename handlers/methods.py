@@ -35,14 +35,25 @@ def method_detail_kb(method_id: str, lang: str) -> InlineKeyboardMarkup:
     ])
 
 
-def method_payment_kb(method_id: str, lang: str) -> InlineKeyboardMarkup:
-    buttons = [
+def method_payment_kb(
+    method_id: str,
+    lang: str,
+    user_credits: float = 0.0,
+    total_price: float = 0.0,
+) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("🔵 USDT TRC20",  callback_data=f"mpay_trc20_{method_id}")],
         [InlineKeyboardButton("🟡 USDT BEP20",  callback_data=f"mpay_bep20_{method_id}")],
         [InlineKeyboardButton("🟠 Binance Pay", callback_data=f"mpay_binance_{method_id}")],
-        [InlineKeyboardButton(t("btn_back", lang), callback_data=f"method_{method_id}")],
     ]
-    return InlineKeyboardMarkup(buttons)
+    if total_price > 0 and user_credits >= total_price:
+        bal_label = (
+            f"💰 {'Pay with balance' if lang == 'en' else 'Pagar con saldo'} "
+            f"(${user_credits:.2f} USDT)"
+        )
+        rows.append([InlineKeyboardButton(bal_label, callback_data=f"mpay_balance_{method_id}")])
+    rows.append([InlineKeyboardButton(t("btn_back", lang), callback_data=f"method_{method_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 # ── Show all methods ──────────────────────────────────────────────────────────
@@ -100,7 +111,10 @@ async def show_method_payment(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("Method not found.", show_alert=True)
         return
 
-    lang = await db.get_user_lang(query.from_user.id)
+    lang         = await db.get_user_lang(query.from_user.id)
+    user         = await db.get_user(query.from_user.id)
+    user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
+
     text = t("choose_payment", lang,
              emoji=method["emoji"],
              name=method["name"],
@@ -108,7 +122,8 @@ async def show_method_payment(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.edit_message_text(
         text, parse_mode="HTML",
-        reply_markup=method_payment_kb(method_id, lang)
+        reply_markup=method_payment_kb(method_id, lang,
+                                       user_credits=user_credits, total_price=method["price"])
     )
 
 
@@ -264,3 +279,80 @@ async def _poll_method_binance(bot, user_id, order_id, prepay_id, method, lang):
                            else f"Pedido #{order_id} expirado/cancelado."),
             parse_mode="HTML"
         )
+
+
+# ── Pay method with wallet balance ────────────────────────────────────────────
+
+async def initiate_balance_method_payment(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Callback: mpay_balance_<method_id> — deduct credits and deliver method."""
+    query = update.callback_query
+    await query.answer()
+
+    method_id = query.data[len("mpay_balance_"):]
+    method    = METHODS.get(method_id)
+    if not method:
+        await query.answer("Method not found.", show_alert=True)
+        return
+
+    user_id = query.from_user.id
+    lang    = await db.get_user_lang(user_id)
+    price   = method["price"]
+
+    # ── Re-check balance ──────────────────────────────────────────────────────
+    user         = await db.get_user(user_id)
+    user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
+
+    if user_credits < price:
+        short = price - user_credits
+        err = (
+            f"❌ Insufficient balance. You have ${user_credits:.2f} but need ${price:.2f} "
+            f"(${short:.2f} short)."
+            if lang == "en" else
+            f"❌ Saldo insuficiente. Tienes ${user_credits:.2f} pero necesitas ${price:.2f} "
+            f"(faltan ${short:.2f})."
+        )
+        await query.answer(err, show_alert=True)
+        return
+
+    # ── Deduct + create order ─────────────────────────────────────────────────
+    await db.use_credits(user_id, price)
+    order_id = await db.create_order(user_id, method_id, price, "balance", item_type="method")
+    await db.update_order_status(order_id, "paid", admin_note="Paid with wallet balance")
+
+    new_credits = user_credits - price
+
+    # ── Auto-deliver ──────────────────────────────────────────────────────────
+    from utils.delivery import auto_deliver
+    stock_delivered = await auto_deliver(context.bot, order_id, method_id, user_id, lang, qty=1)
+
+    if not stock_delivered:
+        order    = await db.get_order(order_id)
+        user_obj = await db.get_user(user_id)
+        await notify_admins_new_order(context.bot, order, user_obj)
+
+        if lang == "en":
+            text = (
+                f"✅ <b>Order #{order_id} placed!</b>\n\n"
+                f"💳 Paid with wallet balance\n"
+                f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
+                f"💵 ${price:.2f} USDT\n"
+                f"💰 Remaining balance: <b>${new_credits:.2f} USDT</b>\n\n"
+                "We'll deliver your method shortly! ⚡"
+            )
+        else:
+            text = (
+                f"✅ <b>¡Pedido #{order_id} realizado!</b>\n\n"
+                f"💳 Pagado con saldo de billetera\n"
+                f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
+                f"💵 ${price:.2f} USDT\n"
+                f"💰 Saldo restante: <b>${new_credits:.2f} USDT</b>\n\n"
+                "¡Te entregaremos el método en breve! ⚡"
+            )
+        from utils.keyboards import main_menu_kb
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=main_menu_kb(lang))
+        except Exception:
+            await query.message.reply_text(text, parse_mode="HTML",
+                                           reply_markup=main_menu_kb(lang))

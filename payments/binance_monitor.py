@@ -153,92 +153,159 @@ async def monitor_binance_pay_payment(
             print(f"[BinanceMonitor] Fetch error: {e}")
             continue
 
-        # Match by payer ID (primary) + amount (secondary)
-        # Payer ID is the user's Binance numeric account ID — unique and reliable.
-        # Amount just needs to match the exact order price (no unique cents needed).
+        # Match by payer ID (primary) + amount range (secondary)
+        # Supports exact match, underpayment (credit to balance) and overpayment (deliver + credit surplus).
         for tx in transactions:
-            amount_ok = abs(tx["amount"] - expected_amount) <= TOLERANCE
-            if not amount_ok:
+            received    = tx["amount"]
+            tx_payer_id = tx["payer_id"].strip().lower()
+
+            # ── Payer ID filter ────────────────────────────────────────────
+            if tx_payer_id:
+                if payer_id_normalized not in tx_payer_id and tx_payer_id not in payer_id_normalized:
+                    continue  # different payer, skip
+            else:
+                # Binance didn't return payer_id — only proceed if amount is in a tight range
+                if abs(received - expected_amount) > 1.0:
+                    continue
+
+            # ── Classify payment ───────────────────────────────────────────
+            is_exact = abs(received - expected_amount) <= TOLERANCE
+            is_under = (not is_exact) and received < expected_amount and received >= expected_amount * 0.3
+            is_over  = (not is_exact) and received > expected_amount and received <= expected_amount * 5.0
+
+            if not (is_exact or is_under or is_over):
                 continue
 
-            # Verify payer ID if Binance returned it in the transaction
-            tx_payer_id = tx["payer_id"].strip().lower()
-            if tx_payer_id:
-                # Both the stored ID and the tx ID must match
-                if payer_id_normalized not in tx_payer_id and tx_payer_id not in payer_id_normalized:
-                    print(f"[BinanceMonitor] ⚠️ Amount match but payer ID mismatch "
-                          f"(expected: {payer_id_normalized}, got: {tx_payer_id}) — skipping")
-                    continue
-            # If Binance didn't return payer_id in API response, amount match is sufficient
+            tx_id = tx["transaction_id"]
+            classification = "Exact" if is_exact else ("Underpayment" if is_under else "Overpayment")
+            print(f"[BinanceMonitor] {classification} | Order #{order_id} | "
+                  f"expected: ${expected_amount:.2f} | received: ${received:.2f} | TX: {tx_id}")
 
-            if True:  # all checks passed
-                tx_id = tx["transaction_id"]
-                print(f"[BinanceMonitor] ✅ Match por ID+Monto! Order #{order_id} | "
-                      f"payer: {tx_payer_id or 'N/A'} | TX: {tx_id}")
+            await db.update_order_proof(order_id, f"BPAY:{tx_id}")
 
-                await db.update_order_proof(order_id, f"BPAY:{tx_id}")
-                await db.update_order_status(
-                    order_id, "paid",
-                    admin_note=f"Auto Binance Pay detected | TX: {tx_id} | "
-                               f"from: {tx['payer']}"
-                )
-
-                # ── Delete the payment instruction message ─────────────────
-                order = await db.get_order(order_id)
-                if order and order.get("instruction_msg_id"):
-                    try:
-                        await bot.delete_message(
-                            chat_id=order["instruction_chat_id"],
-                            message_id=order["instruction_msg_id"]
-                        )
-                    except Exception:
-                        pass
-
-                # ── Topup orders: credit balance, skip auto_deliver ────────
-                if order.get("item_type") == "topup":
-                    topup_amount = order["amount"]
-                    await db.add_credits(user_id, topup_amount)
-                    await db.update_order_status(
-                        order_id, "delivered",
-                        admin_note=f"Topup auto-credited via Binance Pay | TX: {tx_id}"
+            # ── Delete the payment instruction message ─────────────────────
+            order = await db.get_order(order_id)
+            if order and order.get("instruction_msg_id"):
+                try:
+                    await bot.delete_message(
+                        chat_id=order["instruction_chat_id"],
+                        message_id=order["instruction_msg_id"]
                     )
-                    user        = await db.get_user(user_id)
-                    new_balance = float(user["credits"]) if user else topup_amount
-                    if lang == "en":
-                        topup_msg = (
-                            f"✅ <b>Balance added!</b>\n\n"
-                            f"💰 <b>+${topup_amount:.2f} USDT</b> credited to your wallet.\n"
-                            f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
-                            "You can now use your balance to buy any service 🎉"
-                        )
-                    else:
-                        topup_msg = (
-                            f"✅ <b>¡Saldo añadido!</b>\n\n"
-                            f"💰 <b>+${topup_amount:.2f} USDT</b> añadidos a tu billetera.\n"
-                            f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
-                            "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
-                        )
-                    try:
-                        await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
-                    except Exception:
-                        pass
-                    return
+                except Exception:
+                    pass
 
-                # ── Regular service/method: auto-deliver from stock ────────
-                from utils.delivery import auto_deliver
-                service_id      = order["service_id"]
-                stock_delivered = await auto_deliver(
-                    bot, order_id, service_id, user_id, lang, qty=qty)
-
-                # ── Only notify admin if manual delivery needed ─────────────
-                if not stock_delivered:
-                    user = await db.get_user(user_id)
-                    await notify_admins_new_order(bot, order, user)
-
-                # Referral credit
-                from handlers.referrals import handle_first_purchase_referral
-                await handle_first_purchase_referral(bot, user_id)
+            # ── Topup orders: credit actual received amount ────────────────
+            if order.get("item_type") == "topup":
+                credited = round(received, 2)
+                await db.add_credits(user_id, credited)
+                await db.update_order_status(
+                    order_id, "delivered",
+                    admin_note=f"Topup via Binance Pay: received ${received:.2f} | TX: {tx_id}"
+                )
+                user        = await db.get_user(user_id)
+                new_balance = float(user["credits"]) if user else credited
+                if lang == "en":
+                    topup_msg = (
+                        f"✅ <b>Balance added!</b>\n\n"
+                        f"💰 <b>+${credited:.2f} USDT</b> credited to your wallet.\n"
+                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "You can now use your balance to buy any service 🎉"
+                    )
+                else:
+                    topup_msg = (
+                        f"✅ <b>¡Saldo añadido!</b>\n\n"
+                        f"💰 <b>+${credited:.2f} USDT</b> añadidos a tu billetera.\n"
+                        f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
+                    )
+                try:
+                    await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
+                except Exception:
+                    pass
                 return
+
+            # ── Underpayment: credit received to balance, cancel order ─────
+            if is_under:
+                credited = round(received, 2)
+                await db.update_order_status(
+                    order_id, "cancelled",
+                    admin_note=f"Underpayment: received ${received:.2f}, expected ${expected_amount:.2f} | TX: {tx_id}"
+                )
+                await db.add_credits(user_id, credited)
+                user        = await db.get_user(user_id)
+                new_balance = float(user["credits"]) if user else credited
+                if lang == "en":
+                    msg = (
+                        f"⚠️ <b>Incomplete payment — Order #{order_id} cancelled</b>\n\n"
+                        f"We received <b>${received:.2f} USDT</b>, but the order total was "
+                        f"<b>${expected_amount:.2f} USDT</b>.\n\n"
+                        f"💰 <b>${credited:.2f} USDT</b> has been added to your wallet balance.\n"
+                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "You can use your balance to pay the full amount next time, "
+                        "or top up and try again 💙"
+                    )
+                else:
+                    msg = (
+                        f"⚠️ <b>Pago incompleto — Pedido #{order_id} cancelado</b>\n\n"
+                        f"Recibimos <b>${received:.2f} USDT</b>, pero el total era "
+                        f"<b>${expected_amount:.2f} USDT</b>.\n\n"
+                        f"💰 <b>${credited:.2f} USDT</b> han sido añadidos a tu billetera.\n"
+                        f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "Puedes usar tu saldo para cubrir el total la próxima vez, "
+                        "o recargar e intentarlo de nuevo 💙"
+                    )
+                try:
+                    await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
+                except Exception:
+                    pass
+                return
+
+            # ── Exact or overpayment: deliver service ──────────────────────
+            await db.update_order_status(
+                order_id, "paid",
+                admin_note=f"Auto Binance Pay {'(overpayment)' if is_over else ''} | "
+                           f"TX: {tx_id} | from: {tx['payer']} | "
+                           f"received: ${received:.2f} expected: ${expected_amount:.2f}"
+            )
+
+            from utils.delivery import auto_deliver
+            service_id      = order["service_id"]
+            stock_delivered = await auto_deliver(
+                bot, order_id, service_id, user_id, lang, qty=qty)
+
+            if not stock_delivered:
+                user = await db.get_user(user_id)
+                await notify_admins_new_order(bot, order, user)
+
+            # ── Credit surplus to balance if overpayment ───────────────────
+            if is_over:
+                surplus = round(received - expected_amount, 2)
+                await db.add_credits(user_id, surplus)
+                user        = await db.get_user(user_id)
+                new_balance = float(user["credits"]) if user else surplus
+                if lang == "en":
+                    surplus_msg = (
+                        f"💰 <b>Overpayment credited!</b>\n\n"
+                        f"You sent ${received:.2f} for a ${expected_amount:.2f} order.\n"
+                        f"The difference <b>+${surplus:.2f} USDT</b> has been added to your wallet.\n"
+                        f"📊 Balance: <b>${new_balance:.2f} USDT</b>"
+                    )
+                else:
+                    surplus_msg = (
+                        f"💰 <b>¡Excedente acreditado!</b>\n\n"
+                        f"Enviaste ${received:.2f} para un pedido de ${expected_amount:.2f}.\n"
+                        f"La diferencia <b>+${surplus:.2f} USDT</b> fue añadida a tu billetera.\n"
+                        f"📊 Saldo: <b>${new_balance:.2f} USDT</b>"
+                    )
+                try:
+                    await bot.send_message(chat_id=user_id, text=surplus_msg, parse_mode="HTML")
+                except Exception:
+                    pass
+
+            # Referral credit
+            from handlers.referrals import handle_first_purchase_referral
+            await handle_first_purchase_referral(bot, user_id)
+            return
 
     # Timeout — cancel order, delete instruction message, notify user
     order = await db.get_order(order_id)

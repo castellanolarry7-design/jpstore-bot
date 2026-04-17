@@ -4,6 +4,7 @@ keyboards.py – Reusable inline keyboards (language-aware)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from config import SERVICES
 from strings import t
+import database as db
 
 
 def main_menu_kb(lang: str = "en") -> InlineKeyboardMarkup:
@@ -37,8 +38,10 @@ def stock_badge(qty: int, lang: str) -> str:
 
 def catalog_kb(lang: str = "en", stock_levels: dict = None) -> InlineKeyboardMarkup:
     stock_levels = stock_levels or {}
+    # Merge static SERVICES with dynamically-created DB products
+    all_services = {**SERVICES, **db.get_cached_db_products()}
     buttons = []
-    for svc in SERVICES.values():
+    for svc in all_services.values():
         qty = stock_levels.get(svc["id"], 0)
         badge = f" | {stock_badge(qty, lang)}" if stock_levels else ""
         buttons.append([
@@ -125,13 +128,25 @@ def quantity_kb(service_id: str, unit_price: float, max_stock: int, lang: str = 
     return qty_control_kb(service_id, unit_price, 1, max_stock, lang)
 
 
-def payment_method_kb(service_id: str, lang: str = "en") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+def payment_method_kb(
+    service_id: str,
+    lang: str = "en",
+    user_credits: float = 0.0,
+    total_price: float = 0.0,
+) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("🔵 USDT TRC20 (TRON)",  callback_data=f"pay_trc20_{service_id}")],
         [InlineKeyboardButton("🟡 USDT BEP20 (BSC)",   callback_data=f"pay_bep20_{service_id}")],
         [InlineKeyboardButton("🟠 Binance Pay",         callback_data=f"pay_binance_{service_id}")],
-        [InlineKeyboardButton(t("btn_back", lang),       callback_data=f"service_{service_id}")],
-    ])
+    ]
+    if total_price > 0 and user_credits >= total_price:
+        bal_label = (
+            f"💰 {'Pay with balance' if lang == 'en' else 'Pagar con saldo'} "
+            f"(${user_credits:.2f} USDT)"
+        )
+        rows.append([InlineKeyboardButton(bal_label, callback_data=f"pay_balance_{service_id}")])
+    rows.append([InlineKeyboardButton(t("btn_back", lang), callback_data=f"service_{service_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def order_confirm_kb(order_id: int, lang: str = "en") -> InlineKeyboardMarkup:

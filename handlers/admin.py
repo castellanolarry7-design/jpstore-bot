@@ -1,5 +1,11 @@
 """
-admin.py – Panel de administración completo con gestión de stock
+admin.py – Panel de administración completo
+  • Gestión de stock (agregar / ver / eliminar credenciales)
+  • Gestión de productos (crear / eliminar productos dinámicos)
+  • Pedidos pendientes + entrega manual
+  • Estadísticas
+  • Broadcast
+  • Limpieza de pedidos huérfanos
 """
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -11,10 +17,19 @@ import database as db
 from utils.notifications import notify_order_delivered, notify_order_status
 
 # ── Conversation states ────────────────────────────────────────────────────────
-WAITING_ADMIN_PASSWORD = 20
-WAITING_DELIVERY_INFO  = 10
-WAITING_BROADCAST_MSG  = 11
+WAITING_ADMIN_PASSWORD  = 20
+WAITING_DELIVERY_INFO   = 10
+WAITING_BROADCAST_MSG   = 11
 WAITING_STOCK_ADD_CREDS = 21   # receiving credentials after picking a service
+
+# Product creation states
+WAITING_PROD_NAME     = 40
+WAITING_PROD_EMOJI    = 41
+WAITING_PROD_PRICE    = 42
+WAITING_PROD_DESC_EN  = 43
+WAITING_PROD_DESC_ES  = 44
+WAITING_PROD_DELIVERY_EN = 45
+WAITING_PROD_DELIVERY_ES = 46
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -31,7 +46,13 @@ def is_authed(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 def _all_services() -> dict:
-    return {**SERVICES, **METHODS}
+    """Static + DB-cached products + methods."""
+    return {**SERVICES, **db.get_cached_db_products(), **METHODS}
+
+
+def _catalog_services() -> dict:
+    """Services available in the catalog (SERVICES + DB products, not METHODS)."""
+    return {**SERVICES, **db.get_cached_db_products()}
 
 
 def _svc_name(service_id: str) -> str:
@@ -55,6 +76,8 @@ def _admin_main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Usuarios",            callback_data="admin_users"),
          InlineKeyboardButton("📢 Broadcast",           callback_data="admin_broadcast")],
         [InlineKeyboardButton("📦 Gestión de Stock",    callback_data="admin_stock")],
+        [InlineKeyboardButton("🛍️ Gestionar Productos", callback_data="admin_products")],
+        [InlineKeyboardButton("🧹 Limpiar pedidos viejos", callback_data="admin_cleanup")],
     ])
 
 
@@ -62,10 +85,10 @@ def _admin_main_kb() -> InlineKeyboardMarkup:
 
 def _stock_main_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Ver stock",           callback_data="admin_stock_view")],
+        [InlineKeyboardButton("📊 Ver stock",            callback_data="admin_stock_view")],
         [InlineKeyboardButton("➕ Agregar credenciales", callback_data="admin_stock_add_pick")],
-        [InlineKeyboardButton("🗑️ Eliminar item",       callback_data="admin_stock_del_pick")],
-        [InlineKeyboardButton("◀️ Panel admin",         callback_data="admin_panel")],
+        [InlineKeyboardButton("🗑️ Eliminar item",        callback_data="admin_stock_del_pick")],
+        [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
     ])
 
 
@@ -83,11 +106,11 @@ async def _services_pick_kb(action: str) -> InlineKeyboardMarkup:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /admin ENTRY — password gate
+# /weboadmin ENTRY — password gate
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point: /admin command."""
+    """Entry point: /weboadmin command."""
     uid = update.effective_user.id
     if not is_admin(uid):
         await update.message.reply_text("🚫 No tienes permisos.")
@@ -117,7 +140,7 @@ async def admin_check_password(update: Update, context: ContextTypes.DEFAULT_TYP
     if not ADMIN_PASSWORD or entered != ADMIN_PASSWORD:
         await update.message.reply_text(
             "❌ <b>Contraseña incorrecta.</b>\n"
-            "Usa /admin para intentar de nuevo.",
+            "Usa /weboadmin para intentar de nuevo.",
             parse_mode="HTML"
         )
         return ConversationHandler.END
@@ -136,20 +159,20 @@ async def _show_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if update.message:
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=_admin_main_kb())
     elif update.callback_query:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=_admin_main_kb())
+        await update.callback_query.edit_message_text(text, parse_mode="HTML",
+                                                       reply_markup=_admin_main_kb())
 
 
-# ── Callback: admin_panel (show panel from button) ────────────────────────────
+# ── Callback: admin_panel ────────────────────────────────────────────────────
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    uid = query.from_user.id
-    if not is_admin(uid):
+    if not is_admin(query.from_user.id):
         await query.answer("🚫 Solo admins.", show_alert=True)
         return
     if not is_authed(context):
-        await query.answer("🔐 Sesión expirada. Usa /admin.", show_alert=True)
+        await query.answer("🔐 Sesión expirada. Usa /weboadmin.", show_alert=True)
         return
     await query.edit_message_text(
         "⚙️ <b>Panel de Administración</b>\n"
@@ -176,12 +199,39 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👥 Usuarios registrados: <b>{stats['total_users']}</b>\n"
         f"📦 Total pedidos: <b>{stats['total_orders']}</b>\n"
-        f"⏳ Pedidos pendientes: <b>{stats['pending_orders']}</b>\n"
-        f"🎉 Pedidos entregados: <b>{stats['delivered_orders']}</b>\n"
-        f"💰 Ingresos totales: <b>${stats['total_revenue']:.2f} USDT</b>"
+        f"⏳ Pendientes / en pago: <b>{stats['pending_orders']}</b>\n"
+        f"🎉 Pedidos entregados: <b>{stats['delivered_orders']}</b>\n\n"
+        f"💰 <b>Ingresos</b>\n"
+        f"   📅 Hoy:        <b>${stats.get('today_revenue', 0):.2f} USDT</b>\n"
+        f"   📆 Últimos 7d: <b>${stats.get('week_revenue', 0):.2f} USDT</b>\n"
+        f"   🏆 Total:      <b>${stats['total_revenue']:.2f} USDT</b>"
     )
     await query.edit_message_text(
         text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+        ])
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIMPIAR PEDIDOS VIEJOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def admin_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    cancelled = await db.cancel_stale_pending_orders(older_than_minutes=30)
+    if cancelled:
+        msg = f"🧹 <b>{cancelled} pedido(s) caducado(s) cancelado(s)</b>\n\nEran pedidos pendientes con más de 30 minutos sin actividad."
+    else:
+        msg = "✅ <b>No hay pedidos huérfanos.</b>\n\nTodos los pedidos pendientes tienen menos de 30 minutos."
+
+    await query.edit_message_text(
+        msg, parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
         ])
@@ -201,18 +251,20 @@ async def admin_pending_orders(update: Update, context: ContextTypes.DEFAULT_TYP
     orders = await db.get_pending_orders()
     if not orders:
         await query.edit_message_text(
-            "✅ No hay pedidos pendientes.",
+            "✅ No hay pedidos pendientes ni en espera de entrega.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
             ])
         )
         return
 
+    STATUS_ICONS = {"pending": "⏳", "paid": "💳"}
     for o in orders[:5]:
         svc = _all_services().get(o["service_id"], {})
         username_str = f"@{o['username']}" if o.get("username") else f"ID:{o['user_id']}"
+        icon = STATUS_ICONS.get(o["status"], "❓")
         text = (
-            f"⏳ <b>Pedido #{o['order_id']}</b>\n"
+            f"{icon} <b>Pedido #{o['order_id']}</b> [{o['status'].upper()}]\n"
             f"👤 {o['first_name']} ({username_str})\n"
             f"🛒 {svc.get('name', o['service_id'])}\n"
             f"💵 ${o['amount']:.2f} | {o['payment_method'].upper()}\n"
@@ -225,7 +277,7 @@ async def admin_pending_orders(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     await query.edit_message_text(
-        f"📋 <b>{len(orders)} pedido(s) pendiente(s)</b> — primeros 5.",
+        f"📋 <b>{len(orders)} pedido(s) pendiente(s)/pagado(s)</b> — primeros 5.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
@@ -376,7 +428,11 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text  = f"👥 <b>Usuarios registrados: {len(users)}</b>\n\n"
     for u in users[:20]:
         ustr = f"@{u['username']}" if u.get("username") else "sin @"
-        text += f"• {u['first_name']} ({ustr}) — <code>{u['user_id']}</code>\n"
+        cred = float(u.get("credits") or 0)
+        text += f"• {u['first_name']} ({ustr}) — <code>{u['user_id']}</code>"
+        if cred > 0:
+            text += f" 💰${cred:.2f}"
+        text += "\n"
     if len(users) > 20:
         text += f"\n<i>...y {len(users)-20} más</i>"
 
@@ -397,7 +453,7 @@ async def admin_stock_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
-        await query.answer("🔐 Sesión expirada. Usa /admin.", show_alert=True)
+        await query.answer("🔐 Sesión expirada. Usa /weboadmin.", show_alert=True)
         return
 
     levels  = await db.get_all_stock_summary()
@@ -426,7 +482,6 @@ async def admin_stock_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ── Ver items de un servicio ───────────────────────────────────────────────────
 
 async def admin_stock_view_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show service picker to view items."""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
@@ -440,7 +495,6 @@ async def admin_stock_view_pick(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def admin_stock_view_items(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show all available items for a specific service."""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
@@ -452,11 +506,9 @@ async def admin_stock_view_items(update: Update, context: ContextTypes.DEFAULT_T
     svc_name   = _svc_name(service_id)
 
     lines = [f"📦 <b>{svc_name}</b>\n━━━━━━━━━━━━━━━━━━━━━━━"]
-
     if items:
         lines.append(f"✅ <b>Disponibles ({len(items)}):</b>")
         for item in items:
-            # Mask content partially for security (show first 20 chars)
             content_preview = item["content"][:40] + ("…" if len(item["content"]) > 40 else "")
             lines.append(f"  <code>#{item['id']}</code> → {content_preview}")
     else:
@@ -471,23 +523,15 @@ async def admin_stock_view_items(update: Update, context: ContextTypes.DEFAULT_T
                 f" (pedido #{item['order_id']})"
             )
 
-    # Deletion row per item
-    del_buttons = []
-    for item in items[:10]:
-        del_buttons.append(
-            InlineKeyboardButton(
-                f"🗑️ #{item['id']}",
-                callback_data=f"admin_stock_delitem_{item['id']}"
-            )
-        )
-
-    kb_rows = []
-    # Group delete buttons in pairs
-    for i in range(0, len(del_buttons), 3):
-        kb_rows.append(del_buttons[i:i+3])
-
+    del_buttons = [
+        InlineKeyboardButton(f"🗑️ #{item['id']}",
+                             callback_data=f"admin_stock_delitem_{item['id']}")
+        for item in items[:10]
+    ]
+    kb_rows = [del_buttons[i:i+3] for i in range(0, len(del_buttons), 3)]
     kb_rows += [
-        [InlineKeyboardButton(f"➕ Agregar a {svc_name[:20]}", callback_data=f"admin_stock_add_{service_id}")],
+        [InlineKeyboardButton(f"➕ Agregar a {svc_name[:20]}",
+                              callback_data=f"admin_stock_add_{service_id}")],
         [InlineKeyboardButton("◀️ Ver todos", callback_data="admin_stock_view"),
          InlineKeyboardButton("📦 Stock", callback_data="admin_stock")],
     ]
@@ -515,15 +559,30 @@ async def admin_stock_add_pick(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_stock_add_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User picked a service → ask for credentials."""
+    """
+    Entry point for stock_add_conv.
+    Triggered by callbacks: admin_stock_add_<service_id>
+    NOTE: The callback 'admin_stock_add_pick' also matches the ConversationHandler pattern —
+    we guard against it here and redirect to the picker instead.
+    """
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
         return ConversationHandler.END
 
     service_id = query.data.replace("admin_stock_add_", "", 1)
-    svc_name   = _svc_name(service_id)
-    current    = await db.get_stock_level(service_id)
+
+    # ── Guard: "pick" comes from the main stock menu button, not a real service ──
+    if service_id == "pick":
+        await query.edit_message_text(
+            "➕ <b>Agregar Stock — Elige el servicio:</b>",
+            parse_mode="HTML",
+            reply_markup=await _services_pick_kb("admin_stock_add")
+        )
+        return ConversationHandler.END
+
+    svc_name = _svc_name(service_id)
+    current  = await db.get_stock_level(service_id)
 
     context.user_data["stock_add_service_id"]   = service_id
     context.user_data["stock_add_service_name"] = svc_name
@@ -534,8 +593,7 @@ async def admin_stock_add_service(update: Update, context: ContextTypes.DEFAULT_
         f"📊 Stock actual: <b>{current}</b> disponibles\n\n"
         "Envía las credenciales <b>una por línea</b>:\n\n"
         "<code>usuario@email.com:contraseña</code>\n"
-        "<code>usuario2@email.com:contraseña2</code>\n"
-        "<code>usuario3@email.com:contraseña3</code>\n\n"
+        "<code>usuario2@email.com:contraseña2</code>\n\n"
         "Puedes pegar todas a la vez. Envía /cancelar para abortar.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
@@ -547,6 +605,9 @@ async def admin_stock_add_service(update: Update, context: ContextTypes.DEFAULT_
 
 async def admin_stock_receive_creds(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Receives pasted credentials and saves to stock."""
+    if not is_admin(update.effective_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
     service_id = context.user_data.get("stock_add_service_id")
     svc_name   = context.user_data.get("stock_add_service_name", service_id)
 
@@ -579,7 +640,7 @@ async def admin_stock_receive_creds(update: Update, context: ContextTypes.DEFAUL
             [InlineKeyboardButton("📦 Gestión de Stock", callback_data="admin_stock")],
         ])
     )
-    return ConversationHandler.END   # close conversation — click "Agregar más" to reopen
+    return ConversationHandler.END
 
 
 async def admin_stock_add_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -592,13 +653,20 @@ async def admin_stock_add_cancel(update: Update, context: ContextTypes.DEFAULT_T
                 [InlineKeyboardButton("📦 Gestión de Stock", callback_data="admin_stock")]
             ])
         )
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "✅ Operación cancelada.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📦 Gestión de Stock", callback_data="admin_stock")]
+            ])
+        )
     return ConversationHandler.END
 
 
-# ── Eliminar item ──────────────────────────────────────────────────────────────
+# ── Eliminar item de stock ──────────────────────────────────────────────────────
 
 async def admin_stock_del_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show service picker for deletion."""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
@@ -612,7 +680,6 @@ async def admin_stock_del_pick(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_stock_del_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show available items for a service with delete buttons."""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
@@ -639,7 +706,8 @@ async def admin_stock_del_view(update: Update, context: ContextTypes.DEFAULT_TYP
         lines.append(f"  <code>#{item['id']}</code>  {preview}")
 
     del_buttons = [
-        InlineKeyboardButton(f"🗑️ #{item['id']}", callback_data=f"admin_stock_delitem_{item['id']}")
+        InlineKeyboardButton(f"🗑️ #{item['id']}",
+                             callback_data=f"admin_stock_delitem_{item['id']}")
         for item in items
     ]
     kb_rows = [del_buttons[i:i+3] for i in range(0, len(del_buttons), 3)]
@@ -652,7 +720,6 @@ async def admin_stock_del_view(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def admin_stock_del_item(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete a specific stock item by ID (confirm step)."""
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
@@ -663,20 +730,273 @@ async def admin_stock_del_item(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if deleted:
         await query.answer(f"✅ Item #{item_id} eliminado.", show_alert=True)
-        # Refresh the stock menu
         await query.edit_message_text(
-            f"✅ <b>Item <code>#{item_id}</code> eliminado correctamente.</b>\n\n"
-            "Vuelve al panel para seguir gestionando el stock.",
+            f"✅ <b>Item <code>#{item_id}</code> eliminado correctamente.</b>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📦 Gestión de Stock", callback_data="admin_stock")]
             ])
         )
     else:
-        await query.answer(
-            f"❌ Item #{item_id} no encontrado o ya fue entregado.",
-            show_alert=True
+        await query.answer(f"❌ Item #{item_id} no encontrado.", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GESTIÓN DE PRODUCTOS DINÁMICOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Products management menu."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        await query.answer("🔐 Sesión expirada. Usa /weboadmin.", show_alert=True)
+        return
+
+    db_prods = await db.get_all_db_products()
+
+    lines = ["🛍️ <b>Gestionar Productos</b>\n━━━━━━━━━━━━━━━━━━━━━━━"]
+    if db_prods:
+        lines.append(f"<i>Productos creados desde el bot ({len(db_prods)}):</i>\n")
+        for p in db_prods:
+            lines.append(f"  {p['emoji']} <b>{p['name']}</b> — ${float(p['price']):.2f} USDT"
+                         f"  <code>[{p['service_id']}]</code>")
+    else:
+        lines.append("\n<i>No hay productos dinámicos creados aún.</i>")
+    lines.append("\n<i>Los productos estáticos del config.py no se muestran aquí.</i>")
+
+    del_buttons = []
+    for p in db_prods:
+        del_buttons.append([InlineKeyboardButton(
+            f"🗑️ Eliminar {p['emoji']} {p['name'][:20]}",
+            callback_data=f"admin_prod_del_{p['id']}"
+        )])
+
+    kb = InlineKeyboardMarkup(del_buttons + [
+        [InlineKeyboardButton("➕ Crear nuevo producto", callback_data="admin_prod_add")],
+        [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+    ])
+
+    await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+# ── Crear producto — conversación multi-paso ──────────────────────────────────
+
+async def admin_product_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    context.user_data.pop("new_prod", None)   # clear any previous draft
+    await query.edit_message_text(
+        "🛍️ <b>Crear nuevo producto — Paso 1/7</b>\n\n"
+        "¿Cuál es el <b>nombre</b> del producto?\n"
+        "<i>Ejemplo: Spotify Premium 1 Mes</i>\n\n"
+        "/cancelar para abortar.",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_NAME
+
+
+async def admin_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = update.message.text.strip()
+    if len(name) < 2 or len(name) > 60:
+        await update.message.reply_text("⚠️ El nombre debe tener entre 2 y 60 caracteres.")
+        return WAITING_PROD_NAME
+    context.user_data["new_prod"] = {"name": name}
+    await update.message.reply_text(
+        f"✅ Nombre: <b>{name}</b>\n\n"
+        "🎨 <b>Paso 2/7:</b> Envía el <b>emoji</b> del producto.\n"
+        "<i>Ejemplo: 🎵  🎮  🤖  ✨</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_EMOJI
+
+
+async def admin_product_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    emoji = update.message.text.strip()
+    if len(emoji) > 8:
+        emoji = emoji[:8]
+    context.user_data["new_prod"]["emoji"] = emoji
+    await update.message.reply_text(
+        f"✅ Emoji: {emoji}\n\n"
+        "💵 <b>Paso 3/7:</b> ¿Cuál es el <b>precio en USDT</b>?\n"
+        "<i>Ejemplo: 9.99</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_PRICE
+
+
+async def admin_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        price = float(update.message.text.strip().replace(",", "."))
+        if price <= 0 or price > 9999:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ Precio inválido. Escribe un número como 9.99")
+        return WAITING_PROD_PRICE
+    context.user_data["new_prod"]["price"] = price
+    await update.message.reply_text(
+        f"✅ Precio: <b>${price:.2f} USDT</b>\n\n"
+        "📝 <b>Paso 4/7:</b> Escribe la <b>descripción en inglés</b>.\n"
+        "<i>Ejemplo: 1 Month Premium Spotify account with full access.</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_DESC_EN
+
+
+async def admin_product_desc_en(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_prod"]["desc_en"] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Descripción EN guardada.\n\n"
+        "📝 <b>Paso 5/7:</b> Escribe la <b>descripción en español</b>.",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_DESC_ES
+
+
+async def admin_product_desc_es(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_prod"]["desc_es"] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Descripción ES guardada.\n\n"
+        "⏱️ <b>Paso 6/7:</b> <b>Tiempo de entrega (inglés)</b>.\n"
+        "<i>Ejemplo: Instant delivery</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_DELIVERY_EN
+
+
+async def admin_product_delivery_en(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_prod"]["delivery_en"] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Entrega EN guardada.\n\n"
+        "⏱️ <b>Paso 7/7:</b> <b>Tiempo de entrega (español)</b>.\n"
+        "<i>Ejemplo: Entrega inmediata</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_PROD_DELIVERY_ES
+
+
+async def admin_product_delivery_es(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Last step — show preview and ask for confirmation."""
+    context.user_data["new_prod"]["delivery_es"] = update.message.text.strip()
+    p = context.user_data["new_prod"]
+
+    preview = (
+        f"🛍️ <b>Vista previa del producto</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{p['emoji']} <b>{p['name']}</b>\n"
+        f"💵 ${p['price']:.2f} USDT\n\n"
+        f"📝 <b>EN:</b> {p['desc_en']}\n"
+        f"📝 <b>ES:</b> {p['desc_es']}\n\n"
+        f"⏱️ <b>Entrega EN:</b> {p['delivery_en']}\n"
+        f"⏱️ <b>Entrega ES:</b> {p['delivery_es']}\n\n"
+        "¿Confirmas la creación de este producto?"
+    )
+    await update.message.reply_text(
+        preview, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirmar", callback_data="admin_prod_confirm"),
+             InlineKeyboardButton("❌ Cancelar",  callback_data="admin_prod_cancel")],
+        ])
+    )
+    return ConversationHandler.END
+
+
+async def admin_product_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: user confirmed product creation."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    p = context.user_data.pop("new_prod", None)
+    if not p:
+        await query.answer("❌ Datos expirados. Vuelve a intentarlo.", show_alert=True)
+        return
+
+    try:
+        new_id = await db.create_db_product(
+            name=p["name"], emoji=p["emoji"], price=p["price"],
+            desc_en=p["desc_en"], desc_es=p["desc_es"],
+            delivery_en=p["delivery_en"], delivery_es=p["delivery_es"],
         )
+    except Exception as e:
+        await query.edit_message_text(f"❌ Error al crear producto: {e}")
+        return
+
+    # Find the generated service_id from the cache
+    cached = db.get_cached_db_products()
+    sid = next((k for k, v in cached.items() if v.get("_db_id") == new_id), "?")
+
+    await query.edit_message_text(
+        f"🎉 <b>Producto creado exitosamente!</b>\n\n"
+        f"{p['emoji']} <b>{p['name']}</b>\n"
+        f"💵 ${p['price']:.2f} USDT\n"
+        f"🔑 ID interno: <code>{sid}</code>\n\n"
+        f"Ya aparece en el catálogo para los usuarios.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛍️ Gestionar Productos", callback_data="admin_products")],
+            [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+        ])
+    )
+
+
+async def admin_product_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback or command: cancel product creation."""
+    context.user_data.pop("new_prod", None)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "❌ Creación de producto cancelada.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛍️ Gestionar Productos", callback_data="admin_products")],
+                [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+            ])
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Creación de producto cancelada.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+            ])
+        )
+    if hasattr(update, "callback_query") and update.callback_query:
+        return ConversationHandler.END
+
+
+async def admin_product_del(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: admin_prod_del_<db_id> — delete a dynamic product."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    db_id = int(query.data.replace("admin_prod_del_", "", 1))
+
+    # Find product name before deleting
+    cached = db.get_cached_db_products()
+    prod_name = next(
+        (v["name"] for v in cached.values() if v.get("_db_id") == db_id),
+        f"#ID{db_id}"
+    )
+
+    deleted = await db.delete_db_product(db_id)
+    if deleted:
+        await query.answer(f"✅ Producto '{prod_name}' eliminado.", show_alert=True)
+        await query.edit_message_text(
+            f"✅ <b>Producto eliminado: {prod_name}</b>\n\n"
+            "Ya no aparecerá en el catálogo.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛍️ Gestionar Productos", callback_data="admin_products")],
+                [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+            ])
+        )
+    else:
+        await query.answer("❌ Producto no encontrado.", show_alert=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -685,8 +1005,17 @@ async def admin_stock_del_item(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def admin_cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("deliver_order_id", None)
+    context.user_data.pop("new_prod", None)
     if update.message:
         await update.message.reply_text(
+            "❌ Operación cancelada.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+            ])
+        )
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
             "❌ Operación cancelada.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
@@ -709,15 +1038,14 @@ def admin_order_kb(order_id: int, user_id: int) -> InlineKeyboardMarkup:
     return _admin_order_kb(order_id, user_id)
 
 
-# ── Legacy /addstock and /stock commands (kept for backward compat) ───────────
+# ── Legacy /addstock and /stock commands ─────────────────────────────────────
 
 async def cmd_addstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
     if not is_authed(context):
-        await update.message.reply_text("🔐 Usa /admin primero para autenticarte.")
+        await update.message.reply_text("🔐 Usa /weboadmin primero para autenticarte.")
         return ConversationHandler.END
-    context.user_data["stock_action"] = "add"
     args = context.args
     if not args:
         kb = await _services_pick_kb("admin_stock_add")
@@ -726,7 +1054,8 @@ async def cmd_addstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     service_id = args[0].strip()
     svc = _all_services().get(service_id)
     if not svc:
-        await update.message.reply_text(f"❌ ID <code>{service_id}</code> no encontrado.", parse_mode="HTML")
+        await update.message.reply_text(
+            f"❌ ID <code>{service_id}</code> no encontrado.", parse_mode="HTML")
         return ConversationHandler.END
     context.user_data["stock_add_service_id"]   = service_id
     context.user_data["stock_add_service_name"] = _svc_name(service_id)
@@ -743,7 +1072,7 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
     if not is_authed(context):
-        await update.message.reply_text("🔐 Usa /admin primero para autenticarte.")
+        await update.message.reply_text("🔐 Usa /weboadmin primero para autenticarte.")
         return ConversationHandler.END
     levels = await db.get_all_stock_summary()
     if not levels:
@@ -761,11 +1090,14 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 WAITING_STOCK_PASSWORD = WAITING_ADMIN_PASSWORD
 WAITING_STOCK_ITEMS    = WAITING_STOCK_ADD_CREDS
 
+
 async def stock_check_password(*a, **kw):
     return await admin_check_password(*a, **kw)
 
+
 async def stock_receive_items(*a, **kw):
     return await admin_stock_receive_creds(*a, **kw)
+
 
 async def stock_cancel(*a, **kw):
     return await admin_stock_add_cancel(*a, **kw)

@@ -20,12 +20,14 @@ from handlers.start    import start, show_language_selector, set_language, suppo
 from handlers.catalog  import (show_catalog, show_service, show_payment_methods,
                                 show_quantity_selector, qty_control, select_quantity)
 from handlers.methods  import (show_methods, show_method_detail,
-                                show_method_payment, initiate_method_payment)
+                                show_method_payment, initiate_method_payment,
+                                initiate_balance_method_payment)
 from handlers.referrals import show_referrals
 from handlers.orders   import (
     initiate_payment, request_proof, receive_proof,
     cancel_proof, my_orders, cancel_order,
     receive_payer_id, cancel_binance_id,
+    initiate_balance_payment,
     WAITING_PROOF, WAITING_PAYER_ID,
 )
 from handlers.balance  import (
@@ -49,12 +51,21 @@ from handlers.admin    import (
     admin_stock_add_pick, admin_stock_add_service,
     admin_stock_receive_creds, admin_stock_add_cancel,
     admin_stock_del_pick, admin_stock_del_view, admin_stock_del_item,
+    # Product management
+    admin_products, admin_cleanup,
+    admin_product_add_start,
+    admin_product_name, admin_product_emoji, admin_product_price,
+    admin_product_desc_en, admin_product_desc_es,
+    admin_product_delivery_en, admin_product_delivery_es,
+    admin_product_confirm, admin_product_cancel, admin_product_del,
     # Legacy /addstock /stock commands
     cmd_addstock, cmd_stock,
-    stock_receive_items, stock_cancel,
     # States
     WAITING_ADMIN_PASSWORD, WAITING_DELIVERY_INFO,
     WAITING_BROADCAST_MSG, WAITING_STOCK_ADD_CREDS,
+    WAITING_PROD_NAME, WAITING_PROD_EMOJI, WAITING_PROD_PRICE,
+    WAITING_PROD_DESC_EN, WAITING_PROD_DESC_ES,
+    WAITING_PROD_DELIVERY_EN, WAITING_PROD_DELIVERY_ES,
 )
 
 logging.basicConfig(
@@ -77,15 +88,19 @@ def build_application() -> Application:
     # CONVERSATIONS
     # ══════════════════════════════════════════════════════════════════════════
 
-    # ── Admin auth (/admin with password gate) ────────────────────────────────
+    # ── Admin auth (/weboadmin with password gate) ────────────────────────────
     admin_auth_conv = ConversationHandler(
-        entry_points=[CommandHandler("admin", admin_entry)],
+        entry_points=[CommandHandler("weboadmin", admin_entry)],
         states={
             WAITING_ADMIN_PASSWORD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_check_password),
             ]
         },
-        fallbacks=[CommandHandler("cancel", admin_cancel_conv)],
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+        ],
         allow_reentry=True,
     )
     app.add_handler(admin_auth_conv)
@@ -100,14 +115,16 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_stock_receive_creds),
                 CommandHandler("cancelar", admin_stock_add_cancel),
                 CommandHandler("cancel",   admin_stock_add_cancel),
-                # Allow pressing the stock menu button to exit the conversation
+                # Allow pressing the stock/panel buttons to exit the conversation
                 CallbackQueryHandler(admin_stock_add_cancel, pattern=r"^admin_stock$"),
+                CallbackQueryHandler(admin_panel,            pattern=r"^admin_panel$"),
             ]
         },
         fallbacks=[
             CommandHandler("cancelar", admin_stock_add_cancel),
             CommandHandler("cancel",   admin_stock_add_cancel),
             CallbackQueryHandler(admin_stock_add_cancel, pattern=r"^admin_stock$"),
+            CallbackQueryHandler(admin_panel,            pattern=r"^admin_panel$"),
         ],
         allow_reentry=True,
     )
@@ -164,11 +181,13 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_deliver_confirm),
                 CommandHandler("cancel",   admin_cancel_conv),
                 CommandHandler("cancelar", admin_cancel_conv),
+                CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
             ]
         },
         fallbacks=[
             CommandHandler("cancel",   admin_cancel_conv),
             CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
         ],
         allow_reentry=True,
     )
@@ -205,15 +224,54 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast_send),
                 CommandHandler("cancel",   admin_cancel_conv),
                 CommandHandler("cancelar", admin_cancel_conv),
+                CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
             ]
         },
         fallbacks=[
             CommandHandler("cancel",   admin_cancel_conv),
             CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
         ],
         allow_reentry=True,
     )
     app.add_handler(broadcast_conv)
+
+    # ── Product creation (multi-step) ────────────────────────────────────────
+    product_create_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_product_add_start, pattern=r"^admin_prod_add$")],
+        states={
+            WAITING_PROD_NAME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_name),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_EMOJI:       [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_emoji),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_price),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_DESC_EN:     [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_desc_en),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_DESC_ES:     [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_desc_es),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_DELIVERY_EN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_delivery_en),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_DELIVERY_ES: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_delivery_es),
+                                       CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                       CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_product_cancel, pattern=r"^admin_prod_cancel$"),
+            CallbackQueryHandler(admin_panel,          pattern=r"^admin_panel$"),
+            CallbackQueryHandler(admin_products,       pattern=r"^admin_products$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(product_create_conv)
 
     # ══════════════════════════════════════════════════════════════════════════
     # PLAIN COMMANDS
@@ -241,18 +299,19 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(select_quantity,        pattern=r"^qty_.+_\d+$"))
     app.add_handler(CallbackQueryHandler(show_payment_methods,   pattern=r"^buy_.+$"))
     app.add_handler(CallbackQueryHandler(initiate_payment,       pattern=r"^pay_(trc20|bep20)_.+$"))
+    app.add_handler(CallbackQueryHandler(initiate_balance_payment, pattern=r"^pay_balance_.+$"))
 
     # ── Methods ───────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_methods,            pattern=r"^methods$"))
     app.add_handler(CallbackQueryHandler(show_method_detail,      pattern=r"^method_.+$"))
-    app.add_handler(CallbackQueryHandler(show_method_payment,     pattern=r"^mbuy_.+$"))
-    app.add_handler(CallbackQueryHandler(initiate_method_payment, pattern=r"^mpay_(trc20|bep20)_.+$"))
+    app.add_handler(CallbackQueryHandler(show_method_payment,            pattern=r"^mbuy_.+$"))
+    app.add_handler(CallbackQueryHandler(initiate_method_payment,        pattern=r"^mpay_(trc20|bep20)_.+$"))
+    app.add_handler(CallbackQueryHandler(initiate_balance_method_payment, pattern=r"^mpay_balance_.+$"))
 
     # ── Orders ────────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(my_orders,              pattern=r"^my_orders$"))
     app.add_handler(CallbackQueryHandler(cancel_order,           pattern=r"^cancel_\d+$"))
     # Standalone fallback for stale cancel_payer_id / cancel_topup buttons
-    # (pressed after conversation already ended — just show main menu)
     app.add_handler(CallbackQueryHandler(cancel_binance_id,      pattern=r"^cancel_payer_id$"))
     app.add_handler(CallbackQueryHandler(cancel_topup,           pattern=r"^cancel_topup$"))
 
@@ -282,6 +341,13 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_stock_del_pick,   pattern=r"^admin_stock_del_pick$"))
     app.add_handler(CallbackQueryHandler(admin_stock_del_view,   pattern=r"^admin_stock_delview_.+$"))
     app.add_handler(CallbackQueryHandler(admin_stock_del_item,   pattern=r"^admin_stock_delitem_\d+$"))
+
+    # ── Product management ────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(admin_products,        pattern=r"^admin_products$"))
+    app.add_handler(CallbackQueryHandler(admin_cleanup,         pattern=r"^admin_cleanup$"))
+    app.add_handler(CallbackQueryHandler(admin_product_confirm, pattern=r"^admin_prod_confirm$"))
+    app.add_handler(CallbackQueryHandler(admin_product_cancel,  pattern=r"^admin_prod_cancel$"))
+    app.add_handler(CallbackQueryHandler(admin_product_del,     pattern=r"^admin_prod_del_\d+$"))
 
     return app
 

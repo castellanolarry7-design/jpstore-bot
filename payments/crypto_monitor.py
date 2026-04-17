@@ -189,76 +189,111 @@ async def monitor_crypto_payment(
             print(f"[CryptoMonitor] Fetch error: {e}")
             continue
 
-        # Look for a matching transaction
+        # Look for a matching transaction (exact) or overpayment (deliver + credit surplus).
+        # Note: underpayment detection is skipped for on-chain payments since we can't
+        # verify the sender identity — any under-valued incoming tx could be unrelated.
         for tx in txs:
-            if amount_matches(tx["amount"], expected_amount):
-                tx_id = tx["tx_id"]
-                print(f"[CryptoMonitor] ✅ Match found! Order #{order_id} | TX: {tx_id}")
+            received = tx["amount"]
+            is_exact = amount_matches(received, expected_amount)
+            is_over  = (not is_exact) and received > expected_amount and received <= expected_amount * 5.0
 
-                # Save proof and mark paid
-                await db.update_order_proof(order_id, f"TX:{tx_id}")
-                await db.update_order_status(
-                    order_id, "paid",
-                    admin_note=f"Auto-detected {network.upper()} payment | TX: {tx_id}"
-                )
+            if not (is_exact or is_over):
+                continue
 
-                # ── Delete the payment instruction message ─────────────────
-                order = await db.get_order(order_id)
-                if order and order.get("instruction_msg_id"):
-                    try:
-                        await bot.delete_message(
-                            chat_id=order["instruction_chat_id"],
-                            message_id=order["instruction_msg_id"]
-                        )
-                    except Exception:
-                        pass
+            tx_id = tx["tx_id"]
+            classification = "Exact" if is_exact else "Overpayment"
+            print(f"[CryptoMonitor] ✅ {classification} | Order #{order_id} | "
+                  f"expected: ${expected_amount:.2f} | received: ${received:.2f} | TX: {tx_id}")
 
-                # ── Topup orders: credit balance, skip auto_deliver ────────
-                if order.get("item_type") == "topup":
-                    topup_amount = order["amount"]
-                    await db.add_credits(user_id, topup_amount)
-                    await db.update_order_status(
-                        order_id, "delivered",
-                        admin_note=f"Topup auto-credited via {network.upper()} | TX: {tx_id}"
+            # Save proof and mark paid
+            await db.update_order_proof(order_id, f"TX:{tx_id}")
+            await db.update_order_status(
+                order_id, "paid",
+                admin_note=f"Auto-detected {network.upper()} {'(overpayment)' if is_over else ''} | "
+                           f"TX: {tx_id} | received: ${received:.2f} expected: ${expected_amount:.2f}"
+            )
+
+            # ── Delete the payment instruction message ─────────────────────
+            order = await db.get_order(order_id)
+            if order and order.get("instruction_msg_id"):
+                try:
+                    await bot.delete_message(
+                        chat_id=order["instruction_chat_id"],
+                        message_id=order["instruction_msg_id"]
                     )
-                    user        = await db.get_user(user_id)
-                    new_balance = float(user["credits"]) if user else topup_amount
-                    if lang == "en":
-                        topup_msg = (
-                            f"✅ <b>Balance added!</b>\n\n"
-                            f"💰 <b>+${topup_amount:.2f} USDT</b> credited to your wallet.\n"
-                            f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
-                            "You can now use your balance to buy any service 🎉"
-                        )
-                    else:
-                        topup_msg = (
-                            f"✅ <b>¡Saldo añadido!</b>\n\n"
-                            f"💰 <b>+${topup_amount:.2f} USDT</b> añadidos a tu billetera.\n"
-                            f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
-                            "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
-                        )
-                    try:
-                        await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
-                    except Exception:
-                        pass
-                    return
+                except Exception:
+                    pass
 
-                # ── Regular service/method: auto-deliver from stock ────────
-                from utils.delivery import auto_deliver
-                service_id      = order["service_id"]
-                stock_delivered = await auto_deliver(
-                    bot, order_id, service_id, user_id, lang, qty=qty)
-
-                # ── If manual delivery needed → notify admins ──────────────
-                if not stock_delivered:
-                    user = await db.get_user(user_id)
-                    await notify_admins_new_order(bot, order, user)
-                # (if auto-delivered, admin was already notified inside auto_deliver)
-
-                # Handle referral credit
-                from handlers.referrals import handle_first_purchase_referral
-                await handle_first_purchase_referral(bot, user_id)
+            # ── Topup orders: credit actual received amount ────────────────
+            if order.get("item_type") == "topup":
+                credited = round(received, 2)
+                await db.add_credits(user_id, credited)
+                await db.update_order_status(
+                    order_id, "delivered",
+                    admin_note=f"Topup via {network.upper()}: received ${received:.2f} | TX: {tx_id}"
+                )
+                user        = await db.get_user(user_id)
+                new_balance = float(user["credits"]) if user else credited
+                if lang == "en":
+                    topup_msg = (
+                        f"✅ <b>Balance added!</b>\n\n"
+                        f"💰 <b>+${credited:.2f} USDT</b> credited to your wallet.\n"
+                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "You can now use your balance to buy any service 🎉"
+                    )
+                else:
+                    topup_msg = (
+                        f"✅ <b>¡Saldo añadido!</b>\n\n"
+                        f"💰 <b>+${credited:.2f} USDT</b> añadidos a tu billetera.\n"
+                        f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
+                    )
+                try:
+                    await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
+                except Exception:
+                    pass
                 return
+
+            # ── Regular service/method: auto-deliver from stock ────────────
+            from utils.delivery import auto_deliver
+            service_id      = order["service_id"]
+            stock_delivered = await auto_deliver(
+                bot, order_id, service_id, user_id, lang, qty=qty)
+
+            # ── If manual delivery needed → notify admins ──────────────────
+            if not stock_delivered:
+                user = await db.get_user(user_id)
+                await notify_admins_new_order(bot, order, user)
+
+            # ── Credit surplus to balance if overpayment ───────────────────
+            if is_over:
+                surplus = round(received - expected_amount, 2)
+                await db.add_credits(user_id, surplus)
+                user        = await db.get_user(user_id)
+                new_balance = float(user["credits"]) if user else surplus
+                if lang == "en":
+                    surplus_msg = (
+                        f"💰 <b>Overpayment credited!</b>\n\n"
+                        f"You sent ${received:.2f} for a ${expected_amount:.2f} order.\n"
+                        f"The difference <b>+${surplus:.2f} USDT</b> has been added to your wallet.\n"
+                        f"📊 Balance: <b>${new_balance:.2f} USDT</b>"
+                    )
+                else:
+                    surplus_msg = (
+                        f"💰 <b>¡Excedente acreditado!</b>\n\n"
+                        f"Enviaste ${received:.2f} para un pedido de ${expected_amount:.2f}.\n"
+                        f"La diferencia <b>+${surplus:.2f} USDT</b> fue añadida a tu billetera.\n"
+                        f"📊 Saldo: <b>${new_balance:.2f} USDT</b>"
+                    )
+                try:
+                    await bot.send_message(chat_id=user_id, text=surplus_msg, parse_mode="HTML")
+                except Exception:
+                    pass
+
+            # Handle referral credit
+            from handlers.referrals import handle_first_purchase_referral
+            await handle_first_purchase_referral(bot, user_id)
+            return
 
     # Timeout — cancel order, delete instruction message, notify user
     order = await db.get_order(order_id)

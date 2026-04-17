@@ -5,6 +5,11 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from config import SERVICES
 import database as db
+
+
+def _all_catalog_services() -> dict:
+    """Merge static SERVICES with dynamically-created DB products."""
+    return {**SERVICES, **db.get_cached_db_products()}
 from strings import t
 from utils.keyboards import (
     catalog_kb, service_detail_kb, payment_method_kb,
@@ -30,7 +35,7 @@ async def show_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
 
     service_id = query.data.split("_", 1)[1]
-    svc = SERVICES.get(service_id)
+    svc = _all_catalog_services().get(service_id)
     if not svc:
         await query.answer("Service not found.", show_alert=True)
         return
@@ -82,7 +87,7 @@ async def show_quantity_selector(update: Update, context: ContextTypes.DEFAULT_T
 
     # service_id may contain underscores (e.g. gemini_pro_1m)
     service_id = query.data[len("qtysel_"):]
-    svc = SERVICES.get(service_id)
+    svc = _all_catalog_services().get(service_id)
     if not svc:
         await query.answer("Service not found.", show_alert=True)
         return
@@ -116,7 +121,7 @@ async def qty_control(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     service_id, qty_str = data.rsplit("_", 1)
     qty        = int(qty_str)
 
-    svc = SERVICES.get(service_id)
+    svc = _all_catalog_services().get(service_id)
     if not svc:
         return
 
@@ -144,7 +149,7 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     service_id, qty_str = data.rsplit("_", 1)
     qty        = int(qty_str)
 
-    svc = SERVICES.get(service_id)
+    svc = _all_catalog_services().get(service_id)
     if not svc:
         await query.answer("Service not found.", show_alert=True)
         return
@@ -184,9 +189,13 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "Elige tu método de pago:"
         )
 
+    user         = await db.get_user(query.from_user.id)
+    user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
+
     await query.edit_message_text(
         text, parse_mode="HTML",
-        reply_markup=payment_method_kb(service_id, lang)
+        reply_markup=payment_method_kb(service_id, lang,
+                                       user_credits=user_credits, total_price=total)
     )
 
 
@@ -196,7 +205,7 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     service_id = query.data.split("_", 1)[1]
-    svc = SERVICES.get(service_id)
+    svc = _all_catalog_services().get(service_id)
     if not svc:
         await query.answer("Service not found.", show_alert=True)
         return
@@ -210,7 +219,11 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
              name=svc["name"],
              price=f"{svc['price']:.2f}")
 
+    user         = await db.get_user(query.from_user.id)
+    user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
+
     await query.edit_message_text(
         text, parse_mode="HTML",
-        reply_markup=payment_method_kb(service_id, lang)
+        reply_markup=payment_method_kb(service_id, lang,
+                                       user_credits=user_credits, total_price=svc["price"])
     )
