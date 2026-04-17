@@ -105,12 +105,13 @@ async def get_bep20_transactions(address: str, min_timestamp_s: int = 0) -> list
     )
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
+                    print(f"[BSCScan] HTTP {resp.status} — check API key / address")
                     return []
                 data = await resp.json()
     except Exception as e:
-        print(f"[BSCScan] Error: {e}")
+        print(f"[BSCScan] Request error: {e}")
         return []
 
     status  = data.get("status")
@@ -162,7 +163,32 @@ async def monitor_crypto_payment(
     """
     Background task: polls blockchain every 30s until payment found or timeout.
     On success: marks order as paid, notifies admin + user.
+    Wrapped in a top-level try/except so NO exception can kill the task silently.
     """
+    try:
+        await _monitor_crypto_payment_inner(
+            bot=bot, order_id=order_id, network=network,
+            expected_amount=expected_amount, user_id=user_id,
+            service_name=service_name, lang=lang, qty=qty,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as exc:
+        import traceback
+        print(f"[CryptoMonitor] ❌ FATAL ERROR on order #{order_id}: {exc}")
+        traceback.print_exc()
+
+
+async def _monitor_crypto_payment_inner(
+    bot,
+    order_id: int,
+    network: str,
+    expected_amount: float,
+    user_id: int,
+    service_name: str,
+    lang: str,
+    qty: int = 1,
+    timeout_seconds: int = DEFAULT_TIMEOUT,
+) -> None:
     import time
     import database as db
     from utils.notifications import notify_admins_new_order
@@ -174,18 +200,23 @@ async def monitor_crypto_payment(
     start_ts_s  = int(start_time - TIMESTAMP_BUFFER_S)           # BSCScan uses seconds
 
     seen_txids: set = set()  # avoid re-processing the same TX across poll cycles
+    poll_count = 0
 
-    print(f"[CryptoMonitor] Watching order #{order_id} | {network.upper()} | "
-          f"${expected_amount:.2f} USDT | address: {address}")
+    print(f"[CryptoMonitor] ▶ Started | order #{order_id} | {network.upper()} | "
+          f"expected ${expected_amount:.2f} USDT | address: {address}")
 
     while time.time() - start_time < timeout_seconds:
         await asyncio.sleep(POLL_INTERVAL)
+        poll_count += 1
+        elapsed = int(time.time() - start_time)
 
         # Check if order was cancelled or already processed
         order = await db.get_order(order_id)
         if not order or order["status"] != "pending":
-            print(f"[CryptoMonitor] Order #{order_id} no longer pending, stopping.")
+            print(f"[CryptoMonitor] Order #{order_id} status={order['status'] if order else 'NOT FOUND'}, stopping.")
             return
+
+        print(f"[CryptoMonitor] Poll #{poll_count} | order #{order_id} | {elapsed}s elapsed | querying {network.upper()}…")
 
         # Fetch recent transactions
         try:
@@ -194,8 +225,10 @@ async def monitor_crypto_payment(
             else:
                 txs = await get_bep20_transactions(address, min_timestamp_s=start_ts_s)
         except Exception as e:
-            print(f"[CryptoMonitor] Fetch error: {e}")
+            print(f"[CryptoMonitor] ⚠ Fetch error on poll #{poll_count}: {e}")
             continue
+
+        print(f"[CryptoMonitor] Poll #{poll_count} | {len(txs)} transaction(s) found")
 
         # Look for a matching transaction (exact) or overpayment (deliver + credit surplus).
         # Note: underpayment detection is skipped for on-chain payments since we can't
@@ -327,17 +360,18 @@ async def monitor_crypto_payment(
             except Exception:
                 pass
 
+        timeout_min = timeout_seconds // 60
         if lang == "en":
             timeout_msg = (
                 f"⏰ <b>Order #{order_id} expired</b>\n\n"
-                "We didn't detect your payment in 15 minutes. "
+                f"We didn't detect your payment in {timeout_min} minutes. "
                 "The order was cancelled automatically.\n\n"
                 "If you already sent the payment, contact support 💙"
             )
         else:
             timeout_msg = (
                 f"⏰ <b>Pedido #{order_id} vencido</b>\n\n"
-                "No detectamos tu pago en 15 minutos. "
+                f"No detectamos tu pago en {timeout_min} minutos. "
                 "El pedido fue cancelado automáticamente.\n\n"
                 "Si ya enviaste el pago, contacta soporte 💙"
             )
