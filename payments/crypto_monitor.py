@@ -1,10 +1,13 @@
 """
 crypto_monitor.py – Automated blockchain payment detection
-Monitors TRC20 (TronGrid API) and BEP20 (BSCScan API) for incoming USDT.
+Monitors TRC20 (TronGrid API) and BEP20 (BSC public RPC / BSCScan fallback).
 
-Free API keys:
-  TronGrid:  https://www.trongrid.io  (free tier: 15 req/sec)
-  BSCScan:   https://bscscan.com/apis (free tier: 5 req/sec, 100k/day)
+BEP20 strategy (no API key needed):
+  Primary:  BSC public JSON-RPC via eth_getLogs — completely free, no signup
+  Fallback: BSCScan API (optional key in .env as BSCSCAN_API_KEY)
+
+TRC20:
+  TronGrid API key (optional, improves rate limit): TRONGRID_API_KEY in .env
 """
 import asyncio
 import aiohttp
@@ -16,6 +19,17 @@ from config import (
 # ── Contract addresses ────────────────────────────────────────────────────────
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"   # USDT on TRON
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"  # USDT on BSC
+
+# ── BSC public RPC endpoints (tried in order, no API key needed) ──────────────
+BSC_RPC_ENDPOINTS = [
+    "https://bsc-dataseed.binance.org/",
+    "https://bsc-dataseed1.defibit.io/",
+    "https://bsc-dataseed1.ninicoin.io/",
+    "https://rpc.ankr.com/bsc",
+]
+
+# ERC-20 Transfer(address indexed from, address indexed to, uint256 value)
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 POLL_INTERVAL       = 30    # seconds between blockchain checks
 TOLERANCE           = 0.02  # $0.02 tolerance for amount matching (covers float rounding)
@@ -91,36 +105,175 @@ async def get_trc20_transactions(address: str, min_timestamp_ms: int = 0) -> lis
 
 # ── BEP20 (BSCScan) ──────────────────────────────────────────────────────────
 
+async def _rpc_post(endpoint: str, payload: dict) -> dict | None:
+    """POST a JSON-RPC request to a BSC node. Returns parsed response or None."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                endpoint, json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+    except Exception as e:
+        print(f"[BSC-RPC] {endpoint} error: {e}")
+        return None
+
+
+async def _get_current_block() -> int | None:
+    """Returns the latest BSC block number via public RPC."""
+    payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
+    for endpoint in BSC_RPC_ENDPOINTS:
+        result = await _rpc_post(endpoint, payload)
+        if result and "result" in result:
+            try:
+                return int(result["result"], 16)
+            except Exception:
+                continue
+    return None
+
+
+async def _get_bep20_logs(from_block: int, to_block: int, address: str) -> list[dict]:
+    """
+    Queries eth_getLogs for USDT Transfer events to `address` in block range.
+    Pads address to 32-byte topic format (left-padded with zeros).
+    """
+    # Topics: [Transfer signature, any from, to=address]
+    padded = "0x" + address.lower().replace("0x", "").zfill(64)
+    payload = {
+        "jsonrpc": "2.0", "method": "eth_getLogs", "id": 1,
+        "params": [{
+            "fromBlock": hex(from_block),
+            "toBlock":   hex(to_block),
+            "address":   USDT_BEP20_CONTRACT,
+            "topics":    [ERC20_TRANSFER_TOPIC, None, padded],
+        }]
+    }
+    for endpoint in BSC_RPC_ENDPOINTS:
+        result = await _rpc_post(endpoint, payload)
+        if result is None:
+            continue
+        if "error" in result:
+            print(f"[BSC-RPC] eth_getLogs error from {endpoint}: {result['error']}")
+            continue
+        logs = result.get("result", [])
+        if isinstance(logs, list):
+            print(f"[BSC-RPC] Got {len(logs)} log(s) from {endpoint}")
+            return logs
+    return []
+
+
 async def get_bep20_transactions(address: str, min_timestamp_s: int = 0) -> list[dict]:
     """
     Returns recent incoming USDT BEP20 transactions to `address`.
+
+    Primary method: BSC public RPC (eth_getLogs) — no API key needed.
+    Fallback: BSCScan API (uses BSCSCAN_API_KEY from .env if set).
+
+    BSC produces ~1 block every 3 seconds, so 600 blocks ≈ 30 minutes.
+    We scan the last 1200 blocks (~60 min) to be safe.
     """
-    url = (
-        "https://api.bscscan.com/api"
+    results = []
+
+    # ── Method 1: BSC public RPC (eth_getLogs) ────────────────────────────────
+    try:
+        current_block = await _get_current_block()
+        if current_block:
+            # ~1 block per 3s → 1200 blocks ≈ 60 min lookback
+            from_block = max(0, current_block - 1200)
+            logs = await _get_bep20_logs(from_block, current_block, address)
+            for log in logs:
+                try:
+                    # value is the last topic / data field (uint256, 18 decimals)
+                    raw_value = int(log.get("data", "0x0"), 16)
+                    amount    = raw_value / 1e18
+                    # block number → approximate timestamp (3s/block)
+                    block_num = int(log.get("blockNumber", "0x0"), 16)
+                    approx_ts = int((block_num - current_block) * 3 + __import__("time").time())
+                    tx_hash   = log.get("transactionHash", "")
+                    results.append({
+                        "tx_id":     tx_hash,
+                        "from":      "0x" + log["topics"][1][-40:] if len(log.get("topics", [])) > 1 else "",
+                        "to":        address,
+                        "amount":    amount,
+                        "timestamp": approx_ts,
+                        "network":   "bep20",
+                    })
+                except Exception:
+                    continue
+            if results:
+                return results
+            # No results from RPC (could mean no txs or RPC issue) — try BSCScan as backup
+            print("[BSC-RPC] No logs via RPC, trying BSCScan as backup…")
+        else:
+            print("[BSC-RPC] Could not get current block, falling back to BSCScan…")
+    except Exception as e:
+        print(f"[BSC-RPC] Unexpected error: {e}, falling back to BSCScan…")
+
+    # ── Method 2: BSCScan fallback ────────────────────────────────────────────
+    base_params = (
         "?module=account&action=tokentx"
         f"&contractaddress={USDT_BEP20_CONTRACT}"
         f"&address={address}"
         "&sort=desc&page=1&offset=30"
-        f"&apikey={BSCSCAN_API_KEY}"
     )
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    print(f"[BSCScan] HTTP {resp.status} — check API key / address")
-                    return []
-                data = await resp.json()
-    except Exception as e:
-        print(f"[BSCScan] Request error: {e}")
-        return []
+    urls = []
+    if BSCSCAN_API_KEY:
+        urls.append("https://api.bscscan.com/api" + base_params + f"&apikey={BSCSCAN_API_KEY}")
+    urls.append("https://api.bscscan.com/api" + base_params)  # keyless fallback
 
-    status  = data.get("status")
-    message = data.get("message", "")
-    if status != "1":
-        # "No transactions found" is normal — not a real error
-        if "no transactions" not in message.lower():
-            print(f"[BSCScan] API error — status={status} message={message}")
-        return []
+    for url in urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+        except Exception as e:
+            print(f"[BSCScan] Request error: {e}")
+            continue
+
+        status  = data.get("status")
+        message = data.get("message", "")
+        raw_res = data.get("result", "")
+
+        if status == "1":
+            for tx in data.get("result", []):
+                try:
+                    to_addr = tx.get("to", "").lower()
+                    if to_addr != address.lower():
+                        continue
+                    decimals  = int(tx.get("tokenDecimal", 18))
+                    raw_value = int(tx.get("value", 0))
+                    amount    = raw_value / (10 ** decimals)
+                    timestamp = int(tx.get("timeStamp", 0))
+                    if timestamp < min_timestamp_s:
+                        continue
+                    results.append({
+                        "tx_id":     tx.get("hash", ""),
+                        "from":      tx.get("from", ""),
+                        "to":        tx.get("to", ""),
+                        "amount":    amount,
+                        "timestamp": timestamp,
+                        "network":   "bep20",
+                    })
+                except Exception:
+                    continue
+            return results
+
+        if "no transactions" in message.lower():
+            return []
+
+        if "notok" in message.lower() or "invalid api" in str(raw_res).lower():
+            print(f"[BSCScan] ⚠ Key rejected ({raw_res}), retrying without key…")
+            continue
+
+        print(f"[BSCScan] Error — status={status} message={message} result={raw_res}")
+        break
+
+    return results
 
     results = []
     for tx in data.get("result", []):
