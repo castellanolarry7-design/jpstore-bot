@@ -51,16 +51,7 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         qty_label = f" x{qty}" if qty > 1 else ""
         disc_note = (f" <i>(-{int(disc_rate*100)}%)</i>" if disc_rate > 0 else "")
-        if lang == "en":
-            msg = (
-                f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
-                f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
-                f"💵 ${total_price:.2f} USDT{disc_note}\n\n"
-                "Please send us <b>your Binance Pay ID</b> "
-                "(the numeric ID of your account).\n\n"
-                "📍 <i>Binance App → Pay → My QR → number below the QR code</i>"
-            )
-        else:
+        if lang == "es":
             msg = (
                 f"🟠 <b>Binance Pay — Paso 1 de 2</b>\n\n"
                 f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
@@ -69,10 +60,19 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 "(el número de tu cuenta).\n\n"
                 "📍 <i>Binance App → Pay → Mi QR → número bajo el código QR</i>"
             )
+        else:
+            msg = (
+                f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
+                f"🛒 {svc['emoji']} <b>{svc['name']}{qty_label}</b>\n"
+                f"💵 ${total_price:.2f} USDT{disc_note}\n\n"
+                "Please send us <b>your Binance Pay ID</b> "
+                "(the numeric ID of your account).\n\n"
+                "📍 <i>Binance App → Pay → My QR → number below the QR code</i>"
+            )
 
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         cancel_kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ " + ("Cancel" if lang == "en" else "Cancelar"),
+            InlineKeyboardButton("❌ " + ("Cancelar" if lang == "es" else "Cancel"),
                                  callback_data="cancel_payer_id")
         ]])
         await query.edit_message_text(msg, parse_mode="HTML", reply_markup=cancel_kb)
@@ -95,20 +95,20 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         net_name = "🟡 <b>USDT BEP20 (BSC)</b>"
         net_warn = t("warning_bep20", lang)
 
-    if lang == "en":
-        auto_note = (
-            "🤖 <b>Payment is monitored automatically.</b>\n"
-            "Once we detect your transfer, the order confirms itself — "
-            "no need to send a screenshot!"
-        )
-        exact_label = "Send EXACTLY"
-    else:
+    if lang == "es":
         auto_note = (
             "🤖 <b>El pago se monitorea automáticamente.</b>\n"
             "Cuando detectemos tu transferencia, el pedido se confirma solo — "
             "¡no necesitas enviar captura!"
         )
         exact_label = "Envía EXACTAMENTE"
+    else:
+        auto_note = (
+            "🤖 <b>Payment is monitored automatically.</b>\n"
+            "Once we detect your transfer, the order confirms itself — "
+            "no need to send a screenshot!"
+        )
+        exact_label = "Send EXACTLY"
 
     qty_label  = f" x{qty}" if qty > 1 else ""
     disc_label = (f" <i>(-{int(disc_rate*100)}%)</i>" if disc_rate > 0 else "")
@@ -118,8 +118,8 @@ async def initiate_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"💳 {net_name}\n\n"
         f"📤 <b>{'Address' if lang=='en' else 'Dirección'}:</b>\n"
         f"<code>{address}</code>\n\n"
-        f"💵 <b>{exact_label}: <u>${pay_amount:.2f} USDT</u></b>\n"
-        f"<i>{'(unique amount to identify your payment)' if lang=='en' else '(monto único para identificar tu pago)'}</i>\n\n"
+        f"💵 <b>{exact_label}: <u>${pay_amount:.4f} USDT</u></b>\n"
+        f"⚠️ <b>{'Se requiere el monto EXACTO — cualquier otro monto NO será aprobado automáticamente.' if lang=='es' else 'EXACT amount required — any other amount will NOT be approved automatically.'}</b>\n\n"
         f"{net_warn}\n\n"
         f"{auto_note}"
     )
@@ -200,26 +200,28 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await db.set_order_payer(order_id, payer_id, pay_amount)
 
     # Build Step 2 message
-    if lang == "en":
-        steps = (
-            "1️⃣ Open <b>Binance App</b>\n"
-            "2️⃣ Go to <b>Pay</b> → <b>Send</b>\n"
-            f"3️⃣ Search by Binance ID: <code>{BINANCE_PAY_ID}</code>\n"
-            f"4️⃣ Send EXACTLY: <b>${pay_amount:.2f} USDT</b>\n\n"
-            "🤖 <b>We'll detect your payment automatically!</b>"
-        )
-        order_label = "Order"
-        id_label    = "Your Binance Pay ID"
-    else:
+    if lang == "es":
         steps = (
             "1️⃣ Abre la <b>App de Binance</b>\n"
             "2️⃣ Ve a <b>Pay</b> → <b>Enviar</b>\n"
             f"3️⃣ Busca el ID: <code>{BINANCE_PAY_ID}</code>\n"
-            f"4️⃣ Envía EXACTAMENTE: <b>${pay_amount:.2f} USDT</b>\n\n"
+            f"4️⃣ Envía EXACTAMENTE: <b>${pay_amount:.4f} USDT</b>\n"
+            f"⚠️ <b>Se requiere el monto EXACTO — cualquier otro monto NO será aprobado automáticamente.</b>\n\n"
             "🤖 <b>¡Detectaremos tu pago automáticamente!</b>"
         )
         order_label = "Pedido"
         id_label    = "Tu Binance Pay ID"
+    else:
+        steps = (
+            "1️⃣ Open <b>Binance App</b>\n"
+            "2️⃣ Go to <b>Pay</b> → <b>Send</b>\n"
+            f"3️⃣ Search by Binance ID: <code>{BINANCE_PAY_ID}</code>\n"
+            f"4️⃣ Send EXACTLY: <b>${pay_amount:.4f} USDT</b>\n"
+            f"⚠️ <b>EXACT amount required — any other amount will NOT be approved automatically.</b>\n\n"
+            "🤖 <b>We'll detect your payment automatically!</b>"
+        )
+        order_label = "Order"
+        id_label    = "Your Binance Pay ID"
 
     text = (
         f"🟠 <b>Binance Pay — {'Step 2 of 2' if lang=='en' else 'Paso 2 de 2'}</b>\n\n"
@@ -227,8 +229,7 @@ async def receive_payer_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         f"🆔 {order_label}: <b>#{order_id}</b>\n\n"
         f"📲 <b>{'Send to' if lang=='en' else 'Envía a'} Binance Pay ID:</b>\n"
         f"<code>{BINANCE_PAY_ID}</code>\n\n"
-        f"{steps}\n\n"
-        f"<i>({'unique amount to identify your transaction' if lang=='en' else 'monto único para identificar tu transacción'})</i>"
+        f"{steps}"
     )
 
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup as IKM

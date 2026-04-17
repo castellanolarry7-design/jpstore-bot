@@ -21,7 +21,7 @@ import aiohttp
 
 BINANCE_BASE    = "https://api.binance.com"
 POLL_INTERVAL   = 30     # seconds between checks
-TOLERANCE       = 0.005  # $0.005 tolerance for amount matching
+TOLERANCE       = 0.000015  # essentially exact — only covers IEEE 754 float imprecision at 4 decimals
 DEFAULT_TIMEOUT = 900    # 15 minutes
 
 
@@ -204,19 +204,19 @@ async def monitor_binance_pay_payment(
                 )
                 user        = await db.get_user(user_id)
                 new_balance = float(user["credits"]) if user else credited
-                if lang == "en":
-                    topup_msg = (
-                        f"✅ <b>Balance added!</b>\n\n"
-                        f"💰 <b>+${credited:.2f} USDT</b> credited to your wallet.\n"
-                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
-                        "You can now use your balance to buy any service 🎉"
-                    )
-                else:
+                if lang == "es":
                     topup_msg = (
                         f"✅ <b>¡Saldo añadido!</b>\n\n"
                         f"💰 <b>+${credited:.2f} USDT</b> añadidos a tu billetera.\n"
                         f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
                         "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
+                    )
+                else:
+                    topup_msg = (
+                        f"✅ <b>Balance added!</b>\n\n"
+                        f"💰 <b>+${credited:.2f} USDT</b> credited to your wallet.\n"
+                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "You can now use your balance to buy any service 🎉"
                     )
                 try:
                     await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
@@ -234,17 +234,7 @@ async def monitor_binance_pay_payment(
                 await db.add_credits(user_id, credited)
                 user        = await db.get_user(user_id)
                 new_balance = float(user["credits"]) if user else credited
-                if lang == "en":
-                    msg = (
-                        f"⚠️ <b>Incomplete payment — Order #{order_id} cancelled</b>\n\n"
-                        f"We received <b>${received:.2f} USDT</b>, but the order total was "
-                        f"<b>${expected_amount:.2f} USDT</b>.\n\n"
-                        f"💰 <b>${credited:.2f} USDT</b> has been added to your wallet balance.\n"
-                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
-                        "You can use your balance to pay the full amount next time, "
-                        "or top up and try again 💙"
-                    )
-                else:
+                if lang == "es":
                     msg = (
                         f"⚠️ <b>Pago incompleto — Pedido #{order_id} cancelado</b>\n\n"
                         f"Recibimos <b>${received:.2f} USDT</b>, pero el total era "
@@ -253,6 +243,16 @@ async def monitor_binance_pay_payment(
                         f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
                         "Puedes usar tu saldo para cubrir el total la próxima vez, "
                         "o recargar e intentarlo de nuevo 💙"
+                    )
+                else:
+                    msg = (
+                        f"⚠️ <b>Incomplete payment — Order #{order_id} cancelled</b>\n\n"
+                        f"We received <b>${received:.2f} USDT</b>, but the order total was "
+                        f"<b>${expected_amount:.2f} USDT</b>.\n\n"
+                        f"💰 <b>${credited:.2f} USDT</b> has been added to your wallet balance.\n"
+                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "You can use your balance to pay the full amount next time, "
+                        "or top up and try again 💙"
                     )
                 try:
                     await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
@@ -283,19 +283,19 @@ async def monitor_binance_pay_payment(
                 await db.add_credits(user_id, surplus)
                 user        = await db.get_user(user_id)
                 new_balance = float(user["credits"]) if user else surplus
-                if lang == "en":
-                    surplus_msg = (
-                        f"💰 <b>Overpayment credited!</b>\n\n"
-                        f"You sent ${received:.2f} for a ${expected_amount:.2f} order.\n"
-                        f"The difference <b>+${surplus:.2f} USDT</b> has been added to your wallet.\n"
-                        f"📊 Balance: <b>${new_balance:.2f} USDT</b>"
-                    )
-                else:
+                if lang == "es":
                     surplus_msg = (
                         f"💰 <b>¡Excedente acreditado!</b>\n\n"
                         f"Enviaste ${received:.2f} para un pedido de ${expected_amount:.2f}.\n"
                         f"La diferencia <b>+${surplus:.2f} USDT</b> fue añadida a tu billetera.\n"
                         f"📊 Saldo: <b>${new_balance:.2f} USDT</b>"
+                    )
+                else:
+                    surplus_msg = (
+                        f"💰 <b>Overpayment credited!</b>\n\n"
+                        f"You sent ${received:.2f} for a ${expected_amount:.2f} order.\n"
+                        f"The difference <b>+${surplus:.2f} USDT</b> has been added to your wallet.\n"
+                        f"📊 Balance: <b>${new_balance:.2f} USDT</b>"
                     )
                 try:
                     await bot.send_message(chat_id=user_id, text=surplus_msg, parse_mode="HTML")
@@ -323,19 +323,19 @@ async def monitor_binance_pay_payment(
             except Exception:
                 pass
 
-        if lang == "en":
-            msg = (
-                f"⏰ <b>Order #{order_id} expired</b>\n\n"
-                "We didn't detect your Binance Pay transfer in 15 minutes. "
-                "The order was cancelled automatically.\n\n"
-                "If you already paid, contact support 💙"
-            )
-        else:
+        if lang == "es":
             msg = (
                 f"⏰ <b>Pedido #{order_id} vencido</b>\n\n"
                 "No detectamos tu Binance Pay en 15 minutos. "
                 "El pedido fue cancelado automáticamente.\n\n"
                 "Si ya pagaste, contacta soporte 💙"
+            )
+        else:
+            msg = (
+                f"⏰ <b>Order #{order_id} expired</b>\n\n"
+                "We didn't detect your Binance Pay transfer in 15 minutes. "
+                "The order was cancelled automatically.\n\n"
+                "If you already paid, contact support 💙"
             )
         try:
             await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")

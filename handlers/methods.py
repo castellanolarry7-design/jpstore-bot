@@ -160,16 +160,7 @@ async def initiate_method_payment(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["bp_lang"]       = lang
         context.user_data["bp_item_type"]  = "method"
 
-        if lang == "en":
-            msg = (
-                f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
-                f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
-                f"💵 ${method['price']:.2f} USDT\n\n"
-                "Please send us <b>your Binance Pay ID</b> first.\n\n"
-                "📍 <i>Binance App → Pay → My QR → the number below the QR code</i>\n\n"
-                "Type /cancel to abort."
-            )
-        else:
+        if lang == "es":
             msg = (
                 f"🟠 <b>Binance Pay — Paso 1 de 2</b>\n\n"
                 f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
@@ -177,6 +168,15 @@ async def initiate_method_payment(update: Update, context: ContextTypes.DEFAULT_
                 "Envíanos <b>tu ID de Binance Pay</b> primero.\n\n"
                 "📍 <i>Binance App → Pay → Mi QR → el número bajo el código QR</i>\n\n"
                 "Escribe /cancelar para cancelar."
+            )
+        else:
+            msg = (
+                f"🟠 <b>Binance Pay — Step 1 of 2</b>\n\n"
+                f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
+                f"💵 ${method['price']:.2f} USDT\n\n"
+                "Please send us <b>your Binance Pay ID</b> first.\n\n"
+                "📍 <i>Binance App → Pay → My QR → the number below the QR code</i>\n\n"
+                "Type /cancel to abort."
             )
 
         await query.edit_message_text(msg, parse_mode="HTML")
@@ -204,21 +204,21 @@ async def initiate_method_payment(update: Update, context: ContextTypes.DEFAULT_
     import asyncio as _asyncio
     pay_amount = unique_amount(method["price"], order_id)
 
-    if lang == "en":
-        auto_note  = "🤖 <b>Monitored automatically.</b> No screenshot needed!"
-        exact_label = "Send EXACTLY"
-    else:
+    if lang == "es":
         auto_note  = "🤖 <b>Monitoreo automático.</b> ¡No necesitas enviar captura!"
         exact_label = "Envía EXACTAMENTE"
+    else:
+        auto_note  = "🤖 <b>Monitored automatically.</b> No screenshot needed!"
+        exact_label = "Send EXACTLY"
 
     text = (
-        f"📋 <b>{'Order' if lang=='en' else 'Pedido'} #{order_id}</b>\n\n"
+        f"📋 <b>{'Pedido' if lang=='es' else 'Order'} #{order_id}</b>\n\n"
         f"⚡ {method['emoji']} <b>{method['name']}</b>\n"
         f"💳 {net_name}\n\n"
-        f"📤 <b>{'Address' if lang=='en' else 'Dirección'}:</b>\n"
+        f"📤 <b>{'Dirección' if lang=='es' else 'Address'}:</b>\n"
         f"<code>{address}</code>\n\n"
-        f"💵 <b>{exact_label}: <u>${pay_amount:.2f} USDT</u></b>\n"
-        f"<i>{'(unique amount)' if lang=='en' else '(monto único)'}</i>\n\n"
+        f"💵 <b>{exact_label}: <u>${pay_amount:.4f} USDT</u></b>\n"
+        f"⚠️ <b>{'Se requiere el monto EXACTO — cualquier otro monto NO será aprobado automáticamente.' if lang=='es' else 'EXACT amount required — any other amount will NOT be approved automatically.'}</b>\n\n"
         f"{warning}\n\n{auto_note}"
     )
 

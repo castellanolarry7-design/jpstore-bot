@@ -35,25 +35,25 @@ BSC_LOG_BLOCK_RANGE = 100
 # ERC-20 Transfer(address indexed from, address indexed to, uint256 value)
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-POLL_INTERVAL       = 30    # seconds between blockchain checks
-TOLERANCE           = 0.02  # $0.02 tolerance for amount matching (covers float rounding)
-DEFAULT_TIMEOUT     = 900   # 15 minutes
-TIMESTAMP_BUFFER_S  = 300   # look 5 min back to avoid missing txs due to clock skew
+POLL_INTERVAL       = 30     # seconds between blockchain checks
+TOLERANCE           = 0.000015  # essentially exact — only covers IEEE 754 float imprecision at 4 decimals
+DEFAULT_TIMEOUT     = 900    # 15 minutes
+TIMESTAMP_BUFFER_S  = 300    # look 5 min back to avoid missing txs due to clock skew
 
 
 def unique_amount(base_price: float, order_id: int) -> float:
     """
-    Generates a unique payment amount by adding a small decimal.
-    Order #5  → base + $0.05
-    Order #99 → base + $0.99
-    Order #100 → base + $0.00  (wraps, but shows as base price)
-    Always rounds to 2 decimal places.
+    Adds a 4-decimal sub-cent tag (0.0001–0.0030) to identify concurrent orders.
+    Max extra: $0.003 — completely invisible to users.
+    Cycles every 30 orders (1→30→1→…).
+    Example: $10.00 → $10.0001, $10.0002 … $10.0030, $10.0001 …
     """
-    cents = (order_id % 100)
-    return round(base_price + cents * 0.01, 2)
+    tag = (order_id % 30) + 1         # 1..30, never 0
+    return round(base_price + tag * 0.0001, 4)
 
 
 def amount_matches(received: float, expected: float) -> bool:
+    """Exact match within tight float-rounding tolerance (±$0.00055)."""
     return abs(received - expected) <= TOLERANCE
 
 
@@ -447,19 +447,19 @@ async def _monitor_crypto_payment_inner(
                 )
                 user        = await db.get_user(user_id)
                 new_balance = float(user["credits"]) if user else credited
-                if lang == "en":
-                    topup_msg = (
-                        f"✅ <b>Balance added!</b>\n\n"
-                        f"💰 <b>+${credited:.2f} USDT</b> credited to your wallet.\n"
-                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
-                        "You can now use your balance to buy any service 🎉"
-                    )
-                else:
+                if lang == "es":
                     topup_msg = (
                         f"✅ <b>¡Saldo añadido!</b>\n\n"
                         f"💰 <b>+${credited:.2f} USDT</b> añadidos a tu billetera.\n"
                         f"📊 Nuevo saldo: <b>${new_balance:.2f} USDT</b>\n\n"
                         "Ya puedes usar tu saldo para comprar cualquier servicio 🎉"
+                    )
+                else:
+                    topup_msg = (
+                        f"✅ <b>Balance added!</b>\n\n"
+                        f"💰 <b>+${credited:.2f} USDT</b> credited to your wallet.\n"
+                        f"📊 New balance: <b>${new_balance:.2f} USDT</b>\n\n"
+                        "You can now use your balance to buy any service 🎉"
                     )
                 try:
                     await bot.send_message(chat_id=user_id, text=topup_msg, parse_mode="HTML")
@@ -484,19 +484,19 @@ async def _monitor_crypto_payment_inner(
                 await db.add_credits(user_id, surplus)
                 user        = await db.get_user(user_id)
                 new_balance = float(user["credits"]) if user else surplus
-                if lang == "en":
-                    surplus_msg = (
-                        f"💰 <b>Overpayment credited!</b>\n\n"
-                        f"You sent ${received:.2f} for a ${expected_amount:.2f} order.\n"
-                        f"The difference <b>+${surplus:.2f} USDT</b> has been added to your wallet.\n"
-                        f"📊 Balance: <b>${new_balance:.2f} USDT</b>"
-                    )
-                else:
+                if lang == "es":
                     surplus_msg = (
                         f"💰 <b>¡Excedente acreditado!</b>\n\n"
                         f"Enviaste ${received:.2f} para un pedido de ${expected_amount:.2f}.\n"
                         f"La diferencia <b>+${surplus:.2f} USDT</b> fue añadida a tu billetera.\n"
                         f"📊 Saldo: <b>${new_balance:.2f} USDT</b>"
+                    )
+                else:
+                    surplus_msg = (
+                        f"💰 <b>Overpayment credited!</b>\n\n"
+                        f"You sent ${received:.2f} for a ${expected_amount:.2f} order.\n"
+                        f"The difference <b>+${surplus:.2f} USDT</b> has been added to your wallet.\n"
+                        f"📊 Balance: <b>${new_balance:.2f} USDT</b>"
                     )
                 try:
                     await bot.send_message(chat_id=user_id, text=surplus_msg, parse_mode="HTML")
@@ -523,19 +523,19 @@ async def _monitor_crypto_payment_inner(
                 pass
 
         timeout_min = timeout_seconds // 60
-        if lang == "en":
-            timeout_msg = (
-                f"⏰ <b>Order #{order_id} expired</b>\n\n"
-                f"We didn't detect your payment in {timeout_min} minutes. "
-                "The order was cancelled automatically.\n\n"
-                "If you already sent the payment, contact support 💙"
-            )
-        else:
+        if lang == "es":
             timeout_msg = (
                 f"⏰ <b>Pedido #{order_id} vencido</b>\n\n"
                 f"No detectamos tu pago en {timeout_min} minutos. "
                 "El pedido fue cancelado automáticamente.\n\n"
                 "Si ya enviaste el pago, contacta soporte 💙"
+            )
+        else:
+            timeout_msg = (
+                f"⏰ <b>Order #{order_id} expired</b>\n\n"
+                f"We didn't detect your payment in {timeout_min} minutes. "
+                "The order was cancelled automatically.\n\n"
+                "If you already sent the payment, contact support 💙"
             )
         try:
             await bot.send_message(chat_id=user_id, text=timeout_msg, parse_mode="HTML")

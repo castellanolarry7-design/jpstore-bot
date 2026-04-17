@@ -22,8 +22,12 @@ def main_menu_kb(lang: str = "en") -> InlineKeyboardMarkup:
 
 def language_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇺🇸 English", callback_data="setlang_en"),
-         InlineKeyboardButton("🇪🇸 Español", callback_data="setlang_es")],
+        [InlineKeyboardButton("🇺🇸 English",    callback_data="setlang_en"),
+         InlineKeyboardButton("🇪🇸 Español",    callback_data="setlang_es")],
+        [InlineKeyboardButton("🇮🇳 हिंदी",      callback_data="setlang_hi"),
+         InlineKeyboardButton("🇮🇩 Indonesia",  callback_data="setlang_id")],
+        [InlineKeyboardButton("🇵🇰 اردو",       callback_data="setlang_ur"),
+         InlineKeyboardButton("🇨🇳 中文",        callback_data="setlang_zh")],
     ])
 
 

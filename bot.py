@@ -289,7 +289,7 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(start,                  pattern=r"^home$"))
     app.add_handler(CallbackQueryHandler(support,                pattern=r"^support$"))
     app.add_handler(CallbackQueryHandler(show_language_selector, pattern=r"^language$"))
-    app.add_handler(CallbackQueryHandler(set_language,           pattern=r"^setlang_(en|es)$"))
+    app.add_handler(CallbackQueryHandler(set_language,           pattern=r"^setlang_(en|es|hi|id|ur|zh)$"))
 
     # ── Catalog ───────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_catalog,           pattern=r"^catalog$"))

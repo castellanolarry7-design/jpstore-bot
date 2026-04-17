@@ -155,29 +155,29 @@ async def initiate_topup_payment(update: Update, context: ContextTypes.DEFAULT_T
         net_name = "🟡 <b>USDT BEP20 (BSC)</b>"
         net_warn = t("warning_bep20", lang)
 
-    if lang == "en":
-        text = (
-            f"📋 <b>Top-Up Order #{order_id}</b>\n\n"
-            f"💰 Amount: <b>${pay_amount:.2f} USDT</b>\n"
-            f"💳 {net_name}\n\n"
-            f"📤 <b>Send to address:</b>\n"
-            f"<code>{address}</code>\n\n"
-            f"💵 <b>Send EXACTLY: <u>${pay_amount:.2f} USDT</u></b>\n"
-            f"<i>(unique amount to track your top-up)</i>\n\n"
-            f"{net_warn}\n\n"
-            "🤖 <b>Payment detected automatically — credits added instantly!</b>"
-        )
-    else:
+    if lang == "es":
         text = (
             f"📋 <b>Recarga #{order_id}</b>\n\n"
-            f"💰 Monto: <b>${pay_amount:.2f} USDT</b>\n"
+            f"💰 Monto: <b>${pay_amount:.4f} USDT</b>\n"
             f"💳 {net_name}\n\n"
             f"📤 <b>Envía a la dirección:</b>\n"
             f"<code>{address}</code>\n\n"
-            f"💵 <b>Envía EXACTAMENTE: <u>${pay_amount:.2f} USDT</u></b>\n"
-            f"<i>(monto único para rastrear tu recarga)</i>\n\n"
+            f"💵 <b>Envía EXACTAMENTE: <u>${pay_amount:.4f} USDT</u></b>\n"
+            f"⚠️ <b>Se requiere el monto EXACTO — cualquier otro monto NO será aprobado automáticamente.</b>\n\n"
             f"{net_warn}\n\n"
             "🤖 <b>¡Pago detectado automáticamente — créditos añadidos al instante!</b>"
+        )
+    else:
+        text = (
+            f"📋 <b>Top-Up Order #{order_id}</b>\n\n"
+            f"💰 Amount: <b>${pay_amount:.4f} USDT</b>\n"
+            f"💳 {net_name}\n\n"
+            f"📤 <b>Send to address:</b>\n"
+            f"<code>{address}</code>\n\n"
+            f"💵 <b>Send EXACTLY: <u>${pay_amount:.4f} USDT</u></b>\n"
+            f"⚠️ <b>EXACT amount required — any other amount will NOT be approved automatically.</b>\n\n"
+            f"{net_warn}\n\n"
+            "🤖 <b>Payment detected automatically — credits added instantly!</b>"
         )
 
     kb = InlineKeyboardMarkup([
@@ -230,19 +230,19 @@ async def initiate_topup_binance(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data["topup_bp_amount"]   = amount
     context.user_data["topup_bp_lang"]     = lang
 
-    if lang == "en":
-        msg = (
-            f"🟠 <b>Binance Pay Top-Up — Step 1 of 2</b>\n\n"
-            f"💰 Amount: <b>${amount:.2f} USDT</b>\n\n"
-            "Please send us <b>your Binance Pay ID</b> (numeric ID of your account).\n\n"
-            "📍 <i>Binance App → Pay → My QR → number below the QR code</i>"
-        )
-    else:
+    if lang == "es":
         msg = (
             f"🟠 <b>Recarga Binance Pay — Paso 1 de 2</b>\n\n"
             f"💰 Monto: <b>${amount:.2f} USDT</b>\n\n"
             "Envíanos <b>tu ID de Binance Pay</b> (número de tu cuenta).\n\n"
             "📍 <i>Binance App → Pay → Mi QR → número debajo del código QR</i>"
+        )
+    else:
+        msg = (
+            f"🟠 <b>Binance Pay Top-Up — Step 1 of 2</b>\n\n"
+            f"💰 Amount: <b>${amount:.2f} USDT</b>\n\n"
+            "Please send us <b>your Binance Pay ID</b> (numeric ID of your account).\n\n"
+            "📍 <i>Binance App → Pay → My QR → number below the QR code</i>"
         )
     cancel_kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("❌ " + ("Cancel" if lang == "en" else "Cancelar"),
@@ -277,21 +277,23 @@ async def receive_topup_payer_id(update: Update, context: ContextTypes.DEFAULT_T
     pay_amount = round(amount, 2)
     await db.set_order_payer(order_id, payer_id, pay_amount)
 
-    if lang == "en":
-        steps = (
-            "1️⃣ Open <b>Binance App</b>\n"
-            "2️⃣ Go to <b>Pay → Send</b>\n"
-            f"3️⃣ Search Binance ID: <code>{BINANCE_PAY_ID}</code>\n"
-            f"4️⃣ Send EXACTLY: <b>${pay_amount:.2f} USDT</b>\n\n"
-            "🤖 <b>We'll detect it automatically and add credits instantly!</b>"
-        )
-    else:
+    if lang == "es":
         steps = (
             "1️⃣ Abre <b>Binance App</b>\n"
             "2️⃣ Ve a <b>Pay → Enviar</b>\n"
             f"3️⃣ Busca el ID: <code>{BINANCE_PAY_ID}</code>\n"
-            f"4️⃣ Envía EXACTAMENTE: <b>${pay_amount:.2f} USDT</b>\n\n"
+            f"4️⃣ Envía EXACTAMENTE: <b>${pay_amount:.4f} USDT</b>\n"
+            f"⚠️ <b>Se requiere el monto EXACTO — cualquier otro monto NO será aprobado automáticamente.</b>\n\n"
             "🤖 <b>¡Lo detectamos automáticamente y añadimos créditos al instante!</b>"
+        )
+    else:
+        steps = (
+            "1️⃣ Open <b>Binance App</b>\n"
+            "2️⃣ Go to <b>Pay → Send</b>\n"
+            f"3️⃣ Search Binance ID: <code>{BINANCE_PAY_ID}</code>\n"
+            f"4️⃣ Send EXACTLY: <b>${pay_amount:.4f} USDT</b>\n"
+            f"⚠️ <b>EXACT amount required — any other amount will NOT be approved automatically.</b>\n\n"
+            "🤖 <b>We'll detect it automatically and add credits instantly!</b>"
         )
 
     text = (
