@@ -1,15 +1,10 @@
 """
 catalog.py – Service catalog with stock display and quantity selector
 """
-from telegram import Update
+from telegram import Update, InputMediaPhoto
 from telegram.ext import ContextTypes
 from config import SERVICES
 import database as db
-
-
-def _all_catalog_services() -> dict:
-    """Merge static SERVICES with dynamically-created DB products."""
-    return {**SERVICES, **db.get_cached_db_products()}
 from strings import t
 from utils.keyboards import (
     catalog_kb, service_detail_kb, payment_method_kb,
@@ -18,14 +13,34 @@ from utils.keyboards import (
 from utils.delivery import apply_discount
 
 
+def _all_catalog_services() -> dict:
+    """Merge static SERVICES with dynamically-created DB products."""
+    return {**SERVICES, **db.get_cached_db_products()}
+
+
+async def _show_text(query, text: str, reply_markup, parse_mode: str = "HTML") -> None:
+    """
+    Edit the current message to text. If it's a photo message, delete it first
+    and send a new text message (Telegram can't edit a photo into plain text in-place).
+    """
+    try:
+        await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+
 async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     lang         = await db.get_user_lang(query.from_user.id)
     stock_levels = await db.get_stock_levels_dict()
-    await query.edit_message_text(
+    await _show_text(
+        query,
         t("catalog_title", lang),
-        parse_mode="HTML",
         reply_markup=catalog_kb(lang, stock_levels)
     )
 
@@ -54,10 +69,29 @@ async def show_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
              price=f"${svc['price']:.2f} USDT",
              delivery=delivery) + stock_line
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=service_detail_kb(service_id, lang, stock_qty)
-    )
+    kb = service_detail_kb(service_id, lang, stock_qty)
+
+    # ── Check if the service has a photo ─────────────────────────────────────
+    photo_id = await db.get_service_photo(service_id)
+
+    if photo_id:
+        # Delete the current message and send a photo with caption
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        try:
+            await query.message.chat.send_photo(
+                photo=photo_id,
+                caption=text,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        except Exception:
+            # If photo fails (e.g. file expired), fall back to text
+            await query.message.chat.send_message(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await _show_text(query, text, reply_markup=kb)
 
 
 def _qty_header(svc: dict, qty: int, stock_qty: int, lang: str) -> str:
@@ -104,9 +138,9 @@ async def show_quantity_selector(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     qty = 1
-    await query.edit_message_text(
+    await _show_text(
+        query,
         _qty_header(svc, qty, stock_qty, lang),
-        parse_mode="HTML",
         reply_markup=qty_control_kb(service_id, svc["price"], qty, stock_qty, lang)
     )
 
@@ -130,9 +164,9 @@ async def qty_control(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     qty       = max(1, min(qty, stock_qty))
 
     try:
-        await query.edit_message_text(
+        await _show_text(
+            query,
             _qty_header(svc, qty, stock_qty, lang),
-            parse_mode="HTML",
             reply_markup=qty_control_kb(service_id, svc["price"], qty, stock_qty, lang)
         )
     except Exception:
@@ -192,8 +226,8 @@ async def select_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user         = await db.get_user(query.from_user.id)
     user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
+    await _show_text(
+        query, text,
         reply_markup=payment_method_kb(service_id, lang,
                                        user_credits=user_credits, total_price=total)
     )
@@ -222,8 +256,8 @@ async def show_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYP
     user         = await db.get_user(query.from_user.id)
     user_credits = float(user["credits"]) if user and user.get("credits") else 0.0
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
+    await _show_text(
+        query, text,
         reply_markup=payment_method_kb(service_id, lang,
                                        user_credits=user_credits, total_price=svc["price"])
     )

@@ -57,7 +57,11 @@ from handlers.admin    import (
     admin_product_name, admin_product_emoji, admin_product_price,
     admin_product_desc_en, admin_product_desc_es,
     admin_product_delivery_en, admin_product_delivery_es,
+    admin_product_photo_received, admin_product_no_photo,
     admin_product_confirm, admin_product_cancel, admin_product_del,
+    # Photo management
+    admin_static_photos, admin_prod_photo_menu,
+    admin_photo_upload_prompt, admin_photo_receive, admin_photo_delete,
     # Legacy /addstock /stock commands
     cmd_addstock, cmd_stock,
     # States
@@ -66,6 +70,7 @@ from handlers.admin    import (
     WAITING_PROD_NAME, WAITING_PROD_EMOJI, WAITING_PROD_PRICE,
     WAITING_PROD_DESC_EN, WAITING_PROD_DESC_ES,
     WAITING_PROD_DELIVERY_EN, WAITING_PROD_DELIVERY_ES,
+    WAITING_PROD_PHOTO, WAITING_SET_PHOTO,
 )
 
 logging.basicConfig(
@@ -261,6 +266,12 @@ def build_application() -> Application:
             WAITING_PROD_DELIVERY_ES: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_product_delivery_es),
                                        CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
                                        CallbackQueryHandler(admin_products, pattern=r"^admin_products$")],
+            WAITING_PROD_PHOTO:       [
+                MessageHandler(filters.PHOTO, admin_product_photo_received),
+                CallbackQueryHandler(admin_product_no_photo, pattern=r"^admin_prod_no_photo$"),
+                CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                CallbackQueryHandler(admin_products, pattern=r"^admin_products$"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel",   admin_cancel_conv),
@@ -272,6 +283,26 @@ def build_application() -> Application:
         allow_reentry=True,
     )
     app.add_handler(product_create_conv)
+
+    # ── Set photo for existing product (static or dynamic) ────────────────────
+    set_photo_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_photo_upload_prompt, pattern=r"^admin_photo_upload_prompt$"),
+        ],
+        states={
+            WAITING_SET_PHOTO: [
+                MessageHandler(filters.PHOTO, admin_photo_receive),
+                CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(set_photo_conv)
 
     # ══════════════════════════════════════════════════════════════════════════
     # PLAIN COMMANDS
@@ -348,6 +379,10 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_product_confirm, pattern=r"^admin_prod_confirm$"))
     app.add_handler(CallbackQueryHandler(admin_product_cancel,  pattern=r"^admin_prod_cancel$"))
     app.add_handler(CallbackQueryHandler(admin_product_del,     pattern=r"^admin_prod_del_\d+$"))
+    # Photo management
+    app.add_handler(CallbackQueryHandler(admin_static_photos,   pattern=r"^admin_static_photos$"))
+    app.add_handler(CallbackQueryHandler(admin_prod_photo_menu, pattern=r"^admin_prod_photo_.+$"))
+    app.add_handler(CallbackQueryHandler(admin_photo_delete,    pattern=r"^admin_photo_delete$"))
 
     return app
 

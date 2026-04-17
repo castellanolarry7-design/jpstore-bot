@@ -93,8 +93,16 @@ async def _create_tables_pg(conn) -> None:
             description_es  TEXT DEFAULT '',
             delivery_en     TEXT DEFAULT 'Instant delivery',
             delivery_es     TEXT DEFAULT 'Entrega inmediata',
+            photo_file_id   TEXT DEFAULT NULL,
             is_active       INTEGER DEFAULT 1,
             added_at        TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS service_photos (
+            service_id  TEXT PRIMARY KEY,
+            file_id     TEXT NOT NULL,
+            updated_at  TIMESTAMP DEFAULT NOW()
         )
     """)
     await conn.execute("""
@@ -157,18 +165,19 @@ async def _create_tables_pg(conn) -> None:
     """)
     # Safe ALTER TABLE ADD COLUMN IF NOT EXISTS (PG 9.6+)
     for tbl, col, typedef in [
-        ("users",  "credits",              "REAL DEFAULT 0.0"),
-        ("users",  "referral_code",        "TEXT"),
-        ("users",  "referred_by",          "BIGINT"),
-        ("users",  "first_purchase",       "INTEGER DEFAULT 0"),
-        ("users",  "is_banned",            "INTEGER DEFAULT 0"),
-        ("orders", "item_type",            "TEXT DEFAULT 'service'"),
-        ("orders", "credits_used",         "REAL DEFAULT 0.0"),
-        ("orders", "expected_amount",      "REAL"),
-        ("orders", "payer_binance_id",     "TEXT"),
-        ("orders", "instruction_msg_id",   "BIGINT"),
-        ("orders", "instruction_chat_id",  "BIGINT"),
-        ("stock",  "label",                "TEXT"),
+        ("users",    "credits",              "REAL DEFAULT 0.0"),
+        ("users",    "referral_code",        "TEXT"),
+        ("users",    "referred_by",          "BIGINT"),
+        ("users",    "first_purchase",       "INTEGER DEFAULT 0"),
+        ("users",    "is_banned",            "INTEGER DEFAULT 0"),
+        ("orders",   "item_type",            "TEXT DEFAULT 'service'"),
+        ("orders",   "credits_used",         "REAL DEFAULT 0.0"),
+        ("orders",   "expected_amount",      "REAL"),
+        ("orders",   "payer_binance_id",     "TEXT"),
+        ("orders",   "instruction_msg_id",   "BIGINT"),
+        ("orders",   "instruction_chat_id",  "BIGINT"),
+        ("stock",    "label",                "TEXT"),
+        ("products", "photo_file_id",        "TEXT DEFAULT NULL"),
     ]:
         try:
             await conn.execute(
@@ -190,8 +199,16 @@ async def _create_tables_sqlite(db) -> None:
             description_es  TEXT DEFAULT '',
             delivery_en     TEXT DEFAULT 'Instant delivery',
             delivery_es     TEXT DEFAULT 'Entrega inmediata',
+            photo_file_id   TEXT DEFAULT NULL,
             is_active       INTEGER DEFAULT 1,
             added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS service_photos (
+            service_id  TEXT PRIMARY KEY,
+            file_id     TEXT NOT NULL,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     await db.execute("""
@@ -274,6 +291,9 @@ async def _create_tables_sqlite(db) -> None:
         ("stock", "PRAGMA table_info(stock)", {
             "label": "ALTER TABLE stock ADD COLUMN label TEXT",
         }),
+        ("products", "PRAGMA table_info(products)", {
+            "photo_file_id": "ALTER TABLE products ADD COLUMN photo_file_id TEXT DEFAULT NULL",
+        }),
     ]:
         async with db.execute(existing_cols_query) as cur:
             cols = {row[1] for row in await cur.fetchall()}
@@ -320,6 +340,7 @@ async def refresh_products_cache() -> None:
                 "en": r.get("delivery_en") or "Instant delivery",
                 "es": r.get("delivery_es") or "Entrega inmediata",
             },
+            "photo_file_id": r.get("photo_file_id") or None,
             "_db_id": r["id"],   # kept for deletion
         }
 
@@ -333,9 +354,10 @@ async def create_db_product(
     name: str, emoji: str, price: float,
     desc_en: str, desc_es: str,
     delivery_en: str, delivery_es: str,
+    photo_file_id: str | None = None,
 ) -> int:
     """Create a new dynamic product and refresh the cache. Returns the new DB row id."""
-    import re, time as _time
+    import re
     base_sid = re.sub(r"[^a-z0-9]+", "_", name.lower().strip()).strip("_")[:25] or "product"
     service_id = base_sid
     # Avoid collision with existing service_ids (static OR DB)
@@ -347,11 +369,67 @@ async def create_db_product(
         suffix += 1
     new_id = await _insert_returning("""
         INSERT INTO products (service_id, name, emoji, price, description_en, description_es,
-                              delivery_en, delivery_es)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id
-    """, service_id, name, emoji, price, desc_en, desc_es, delivery_en, delivery_es)
+                              delivery_en, delivery_es, photo_file_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id
+    """, service_id, name, emoji, price, desc_en, desc_es, delivery_en, delivery_es, photo_file_id)
     await refresh_products_cache()
     return new_id
+
+
+async def set_service_photo(service_id: str, file_id: str) -> None:
+    """
+    Store a photo for any product (static or dynamic).
+    For dynamic products: updates the products table.
+    For static products: upserts into service_photos table.
+    """
+    from config import SERVICES
+    if service_id in _products_cache:
+        # Dynamic product — update products table
+        await _exec(
+            "UPDATE products SET photo_file_id=$1 WHERE service_id=$2",
+            file_id, service_id
+        )
+        await refresh_products_cache()
+    else:
+        # Static product (or methods) — use service_photos table
+        if _USE_PG:
+            await _exec("""
+                INSERT INTO service_photos (service_id, file_id)
+                VALUES ($1, $2)
+                ON CONFLICT (service_id) DO UPDATE SET file_id=$2, updated_at=NOW()
+            """, service_id, file_id)
+        else:
+            await _exec("""
+                INSERT OR REPLACE INTO service_photos (service_id, file_id)
+                VALUES ($1, $2)
+            """, service_id, file_id)
+
+
+async def get_service_photo(service_id: str) -> str | None:
+    """
+    Get the photo file_id for a product.
+    Dynamic products: from in-memory cache (includes photo_file_id).
+    Static products: from service_photos table.
+    """
+    # Check dynamic products cache first
+    if service_id in _products_cache:
+        return _products_cache[service_id].get("photo_file_id")
+    # Check service_photos table for static products
+    row = await _fetchrow(
+        "SELECT file_id FROM service_photos WHERE service_id=$1", service_id
+    )
+    return row["file_id"] if row else None
+
+
+async def delete_service_photo(service_id: str) -> None:
+    """Remove the photo from a product."""
+    if service_id in _products_cache:
+        await _exec(
+            "UPDATE products SET photo_file_id=NULL WHERE service_id=$1", service_id
+        )
+        await refresh_products_cache()
+    else:
+        await _exec("DELETE FROM service_photos WHERE service_id=$1", service_id)
 
 
 async def delete_db_product(db_id: int) -> bool:
