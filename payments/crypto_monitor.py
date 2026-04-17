@@ -20,13 +20,17 @@ from config import (
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"   # USDT on TRON
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"  # USDT on BSC
 
-# ── BSC public RPC endpoints (tried in order, no API key needed) ──────────────
+# ── BSC public RPC endpoints that support eth_getLogs ────────────────────────
+# PublicNode and LlamaRPC allow small block ranges without API key
 BSC_RPC_ENDPOINTS = [
-    "https://bsc-dataseed.binance.org/",
-    "https://bsc-dataseed1.defibit.io/",
-    "https://bsc-dataseed1.ninicoin.io/",
-    "https://rpc.ankr.com/bsc",
+    "https://bsc-rpc.publicnode.com",
+    "https://binance.llamarpc.com",
+    "https://1rpc.io/bnb",
+    "https://bsc.meowrpc.com",
 ]
+
+# Max block range per eth_getLogs request (3s/block → 100 blocks ≈ 5 min)
+BSC_LOG_BLOCK_RANGE = 100
 
 # ERC-20 Transfer(address indexed from, address indexed to, uint256 value)
 ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -181,8 +185,8 @@ async def get_bep20_transactions(address: str, min_timestamp_s: int = 0) -> list
     try:
         current_block = await _get_current_block()
         if current_block:
-            # ~1 block per 3s → 1200 blocks ≈ 60 min lookback
-            from_block = max(0, current_block - 1200)
+            # ~1 block per 3s → BSC_LOG_BLOCK_RANGE blocks lookback
+            from_block = max(0, current_block - BSC_LOG_BLOCK_RANGE)
             logs = await _get_bep20_logs(from_block, current_block, address)
             for log in logs:
                 try:
@@ -212,17 +216,22 @@ async def get_bep20_transactions(address: str, min_timestamp_s: int = 0) -> list
     except Exception as e:
         print(f"[BSC-RPC] Unexpected error: {e}, falling back to BSCScan…")
 
-    # ── Method 2: BSCScan fallback ────────────────────────────────────────────
+    # ── Method 2: BSCScan / Etherscan V2 fallback ────────────────────────────
     base_params = (
-        "?module=account&action=tokentx"
+        "&module=account&action=tokentx"
         f"&contractaddress={USDT_BEP20_CONTRACT}"
         f"&address={address}"
         "&sort=desc&page=1&offset=30"
     )
     urls = []
     if BSCSCAN_API_KEY:
-        urls.append("https://api.bscscan.com/api" + base_params + f"&apikey={BSCSCAN_API_KEY}")
-    urls.append("https://api.bscscan.com/api" + base_params)  # keyless fallback
+        # V2 unified endpoint (chainid=56 = BSC)
+        urls.append(
+            "https://api.etherscan.io/v2/api?chainid=56"
+            + base_params + f"&apikey={BSCSCAN_API_KEY}"
+        )
+    # V1 BSCScan keyless (still works for now without key)
+    urls.append("https://api.bscscan.com/api?" + base_params.lstrip("&"))
 
     for url in urls:
         try:
