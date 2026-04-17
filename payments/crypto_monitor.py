@@ -17,9 +17,10 @@ from config import (
 USDT_TRC20_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"   # USDT on TRON
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"  # USDT on BSC
 
-POLL_INTERVAL    = 30    # seconds between blockchain checks
-TOLERANCE        = 0.005 # $0.005 tolerance for amount matching
-DEFAULT_TIMEOUT  = 900   # 15 minutes
+POLL_INTERVAL       = 30    # seconds between blockchain checks
+TOLERANCE           = 0.02  # $0.02 tolerance for amount matching (covers float rounding)
+DEFAULT_TIMEOUT     = 900   # 15 minutes
+TIMESTAMP_BUFFER_S  = 300   # look 5 min back to avoid missing txs due to clock skew
 
 
 def unique_amount(base_price: float, order_id: int) -> float:
@@ -112,7 +113,12 @@ async def get_bep20_transactions(address: str, min_timestamp_s: int = 0) -> list
         print(f"[BSCScan] Error: {e}")
         return []
 
-    if data.get("status") != "1":
+    status  = data.get("status")
+    message = data.get("message", "")
+    if status != "1":
+        # "No transactions found" is normal — not a real error
+        if "no transactions" not in message.lower():
+            print(f"[BSCScan] API error — status={status} message={message}")
         return []
 
     results = []
@@ -163,9 +169,11 @@ async def monitor_crypto_payment(
 
     address     = USDT_TRC20 if network == "trc20" else USDT_BEP20
     start_time  = time.time()
-    # Only look at transactions from now onwards
-    start_ts_ms = int(start_time * 1000)   # TronGrid uses ms
-    start_ts_s  = int(start_time)          # BSCScan uses seconds
+    # Look back TIMESTAMP_BUFFER_S seconds to avoid missing txs due to clock skew
+    start_ts_ms = int((start_time - TIMESTAMP_BUFFER_S) * 1000)  # TronGrid uses ms
+    start_ts_s  = int(start_time - TIMESTAMP_BUFFER_S)           # BSCScan uses seconds
+
+    seen_txids: set = set()  # avoid re-processing the same TX across poll cycles
 
     print(f"[CryptoMonitor] Watching order #{order_id} | {network.upper()} | "
           f"${expected_amount:.2f} USDT | address: {address}")
@@ -192,15 +200,25 @@ async def monitor_crypto_payment(
         # Look for a matching transaction (exact) or overpayment (deliver + credit surplus).
         # Note: underpayment detection is skipped for on-chain payments since we can't
         # verify the sender identity — any under-valued incoming tx could be unrelated.
+        if txs:
+            print(f"[CryptoMonitor] Order #{order_id} — {len(txs)} tx(s) to check")
         for tx in txs:
+            tx_id    = tx["tx_id"]
             received = tx["amount"]
+
+            if tx_id in seen_txids:
+                continue  # already processed this TX
+
+            print(f"[CryptoMonitor] Checking TX {tx_id[:20]}… | received: ${received:.4f} | expected: ${expected_amount:.2f}")
+
             is_exact = amount_matches(received, expected_amount)
             is_over  = (not is_exact) and received > expected_amount and received <= expected_amount * 5.0
 
             if not (is_exact or is_over):
+                seen_txids.add(tx_id)   # mark as seen even if no match
                 continue
 
-            tx_id = tx["tx_id"]
+            seen_txids.add(tx_id)
             classification = "Exact" if is_exact else "Overpayment"
             print(f"[CryptoMonitor] ✅ {classification} | Order #{order_id} | "
                   f"expected: ${expected_amount:.2f} | received: ${received:.2f} | TX: {tx_id}")
@@ -298,8 +316,9 @@ async def monitor_crypto_payment(
     # Timeout — cancel order, delete instruction message, notify user
     order = await db.get_order(order_id)
     if order and order["status"] == "pending":
+        timeout_min = timeout_seconds // 60
         await db.update_order_status(order_id, "cancelled",
-                                     admin_note="Auto-cancelled: 15min timeout")
+                                     admin_note=f"Auto-cancelled: {timeout_min}min timeout")
         # Delete instruction message
         if order.get("instruction_msg_id"):
             try:
