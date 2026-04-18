@@ -14,14 +14,19 @@ def _method_price_str(method: dict, lang: str) -> str:
     return f"${method['price']:.2f} USDT"
 
 
+def _all_methods() -> dict:
+    """Merge static config METHODS with DB-created methods."""
+    return {**METHODS, **db.get_cached_db_methods()}
+
+
 def methods_catalog_kb(lang: str) -> InlineKeyboardMarkup:
     buttons = []
-    for m in METHODS.values():
+    for mid, m in _all_methods().items():
         price_str = f"${m['price']:.2f} USDT"
         buttons.append([
             InlineKeyboardButton(
                 f"{m['emoji']} {m['name']} — {price_str}",
-                callback_data=f"method_{m['id']}"
+                callback_data=f"method_{mid}"
             )
         ])
     buttons.append([InlineKeyboardButton(t("btn_home", lang), callback_data="home")])
@@ -77,7 +82,7 @@ async def show_method_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     method_id = query.data.split("_", 1)[1]  # method_<id>
-    method = METHODS.get(method_id)
+    method = _all_methods().get(method_id)
     if not method:
         await query.answer("Method not found.", show_alert=True)
         return
@@ -106,7 +111,7 @@ async def show_method_payment(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
 
     method_id = query.data.split("_", 1)[1]  # mbuy_<id>
-    method = METHODS.get(method_id)
+    method = _all_methods().get(method_id)
     if not method:
         await query.answer("Method not found.", show_alert=True)
         return

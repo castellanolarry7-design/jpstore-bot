@@ -38,6 +38,16 @@ WAITING_SET_PHOTO = 48
 # Welcome photo state (for /setphoto command)
 WAITING_WELCOME_PHOTO = 49
 
+# Method management states
+WAITING_METHOD_NAME        = 50
+WAITING_METHOD_EMOJI       = 51
+WAITING_METHOD_PRICE       = 52
+WAITING_METHOD_DESC_EN     = 53
+WAITING_METHOD_DESC_ES     = 54
+WAITING_METHOD_DELIVERY_EN = 55
+WAITING_METHOD_DELIVERY_ES = 56
+WAITING_METHOD_EDIT_PRICE  = 58
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -83,7 +93,8 @@ def _admin_main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Usuarios",            callback_data="admin_users"),
          InlineKeyboardButton("📢 Broadcast",           callback_data="admin_broadcast")],
         [InlineKeyboardButton("📦 Gestión de Stock",    callback_data="admin_stock")],
-        [InlineKeyboardButton("🛍️ Gestionar Productos", callback_data="admin_products")],
+        [InlineKeyboardButton("🛍️ Productos",           callback_data="admin_products"),
+         InlineKeyboardButton("📘 Métodos",             callback_data="admin_methods")],
         [InlineKeyboardButton("🧹 Limpiar pedidos viejos", callback_data="admin_cleanup")],
     ])
 
@@ -1236,6 +1247,307 @@ async def admin_product_del(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     else:
         await query.answer("❌ Producto no encontrado.", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GESTIÓN DE MÉTODOS DINÁMICOS
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def admin_methods_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: admin_methods — show methods management panel."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        await query.answer("🔐 Sesión expirada.", show_alert=True)
+        return
+
+    from config import METHODS as _STATIC_METHODS
+    db_methods = await db.get_all_db_methods()
+    all_methods = {**_STATIC_METHODS, **db.get_cached_db_methods()}
+
+    lines = ["📘 <b>Gestionar Métodos</b>\n━━━━━━━━━━━━━━━━━━━━━━━"]
+
+    if all_methods:
+        lines.append(f"<i>Total: {len(all_methods)} método(s)</i>\n")
+        for mid, m in all_methods.items():
+            is_db = mid in db.get_cached_db_methods()
+            tag = "🔧 DB" if is_db else "⚙️ Config"
+            lines.append(f"  {m['emoji']} <b>{m['name']}</b> — ${m['price']:.2f}  <i>[{tag}]</i>")
+    else:
+        lines.append("\n<i>No hay métodos configurados.</i>")
+
+    btns = []
+    # Edit-price / delete buttons for DB methods only
+    for m in db_methods:
+        btns.append([
+            InlineKeyboardButton(
+                f"✏️ Precio: {m['emoji']} {m['name'][:18]}",
+                callback_data=f"admin_method_editprice_{m['method_id']}"
+            ),
+            InlineKeyboardButton(
+                f"🗑️ Eliminar",
+                callback_data=f"admin_method_del_{m['id']}"
+            ),
+        ])
+
+    btns += [
+        [InlineKeyboardButton("➕ Agregar nuevo método", callback_data="admin_method_add")],
+        [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+    ]
+
+    await query.edit_message_text("\n".join(lines), parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(btns))
+
+
+# ── Create method — 7-step conversation ──────────────────────────────────────
+
+async def admin_method_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    context.user_data.pop("new_method", None)
+    await query.edit_message_text(
+        "📘 <b>Crear nuevo método — Paso 1/7</b>\n\n"
+        "¿Cuál es el <b>nombre</b> del método?\n"
+        "<i>Ejemplo: Grok – 3 Months</i>\n\n"
+        "/cancelar para abortar.",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_NAME
+
+
+async def admin_method_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    name = update.message.text.strip()
+    if len(name) < 2 or len(name) > 60:
+        await update.message.reply_text("⚠️ Nombre entre 2 y 60 caracteres.")
+        return WAITING_METHOD_NAME
+    context.user_data["new_method"] = {"name": name}
+    await update.message.reply_text(
+        f"✅ Nombre: <b>{name}</b>\n\n"
+        "🎨 <b>Paso 2/7:</b> Envía el <b>emoji</b> del método.\n"
+        "<i>Ejemplo: ⚡ ♾️ 🔑</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_EMOJI
+
+
+async def admin_method_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    emoji = update.message.text.strip()[:8]
+    context.user_data["new_method"]["emoji"] = emoji
+    await update.message.reply_text(
+        f"✅ Emoji: {emoji}\n\n"
+        "💵 <b>Paso 3/7:</b> ¿Cuál es el <b>precio en USDT</b>?\n"
+        "<i>Ejemplo: 12.99</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_PRICE
+
+
+async def admin_method_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        price = float(update.message.text.strip().replace(",", "."))
+        if price <= 0 or price > 9999:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ Precio inválido. Ej: 9.99")
+        return WAITING_METHOD_PRICE
+    context.user_data["new_method"]["price"] = price
+    await update.message.reply_text(
+        f"✅ Precio: <b>${price:.2f} USDT</b>\n\n"
+        "📝 <b>Paso 4/7:</b> Descripción en <b>inglés</b>.",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_DESC_EN
+
+
+async def admin_method_desc_en(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_method"]["desc_en"] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Descripción EN guardada.\n\n"
+        "📝 <b>Paso 5/7:</b> Descripción en <b>español</b>.",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_DESC_ES
+
+
+async def admin_method_desc_es(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_method"]["desc_es"] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Descripción ES guardada.\n\n"
+        "⏱️ <b>Paso 6/7:</b> Tiempo de entrega (inglés).\n"
+        "<i>Ejemplo: Instant delivery</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_DELIVERY_EN
+
+
+async def admin_method_delivery_en(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_method"]["delivery_en"] = update.message.text.strip()
+    await update.message.reply_text(
+        "✅ Entrega EN guardada.\n\n"
+        "⏱️ <b>Paso 7/7:</b> Tiempo de entrega (español).\n"
+        "<i>Ejemplo: Entrega inmediata</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_METHOD_DELIVERY_ES
+
+
+async def admin_method_delivery_es(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data["new_method"]["delivery_es"] = update.message.text.strip()
+    m = context.user_data["new_method"]
+    preview = (
+        f"📘 <b>Vista previa del método</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{m['emoji']} <b>{m['name']}</b>\n"
+        f"💵 ${m['price']:.2f} USDT\n\n"
+        f"📝 EN: {m['desc_en']}\n"
+        f"📝 ES: {m['desc_es']}\n\n"
+        f"⏱️ EN: {m['delivery_en']}\n"
+        f"⏱️ ES: {m['delivery_es']}\n\n"
+        "¿Confirmas la creación de este método?"
+    )
+    await update.message.reply_text(
+        preview, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Confirmar", callback_data="admin_method_confirm"),
+             InlineKeyboardButton("❌ Cancelar",  callback_data="admin_method_cancel")],
+        ])
+    )
+    return ConversationHandler.END
+
+
+async def admin_method_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    m = context.user_data.pop("new_method", None)
+    if not m:
+        await query.answer("❌ Datos expirados.", show_alert=True)
+        return
+
+    try:
+        await db.create_db_method(
+            name=m["name"], emoji=m["emoji"], price=m["price"],
+            desc_en=m["desc_en"], desc_es=m["desc_es"],
+            delivery_en=m["delivery_en"], delivery_es=m["delivery_es"],
+        )
+    except Exception as e:
+        await query.edit_message_text(f"❌ Error al crear método: {e}")
+        return
+
+    await query.edit_message_text(
+        f"🎉 <b>Método creado:</b> {m['emoji']} {m['name']} — ${m['price']:.2f} USDT\n\n"
+        "Ya aparece en el catálogo de métodos.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📘 Gestionar Métodos", callback_data="admin_methods")],
+            [InlineKeyboardButton("◀️ Panel admin",       callback_data="admin_panel")],
+        ])
+    )
+
+
+async def admin_method_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("new_method", None)
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(
+            "❌ Creación de método cancelada.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📘 Métodos", callback_data="admin_methods")],
+                [InlineKeyboardButton("◀️ Panel",   callback_data="admin_panel")],
+            ])
+        )
+    elif update.message:
+        await update.message.reply_text(
+            "❌ Creación de método cancelada.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+            ])
+        )
+
+
+async def admin_method_del(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    db_id   = int(query.data.replace("admin_method_del_", "", 1))
+    cached  = db.get_cached_db_methods()
+    m_name  = next((v["name"] for v in cached.values() if v.get("_db_id") == db_id), f"#ID{db_id}")
+    deleted = await db.delete_db_method(db_id)
+
+    if deleted:
+        await query.answer(f"✅ Método '{m_name}' eliminado.", show_alert=True)
+        await query.edit_message_text(
+            f"✅ <b>Método eliminado: {m_name}</b>\n\nYa no aparece en el catálogo.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📘 Gestionar Métodos", callback_data="admin_methods")],
+                [InlineKeyboardButton("◀️ Panel admin",       callback_data="admin_panel")],
+            ])
+        )
+    else:
+        await query.answer("❌ Método no encontrado.", show_alert=True)
+
+
+async def admin_method_edit_price_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    method_id = query.data.replace("admin_method_editprice_", "", 1)
+    all_m = {**__import__("config").METHODS, **db.get_cached_db_methods()}
+    m = all_m.get(method_id, {})
+    context.user_data["edit_method_id"] = method_id
+
+    await query.edit_message_text(
+        f"✏️ <b>Editar precio:</b> {m.get('emoji','⚡')} {m.get('name', method_id)}\n\n"
+        f"Precio actual: <b>${m.get('price', 0):.2f} USDT</b>\n\n"
+        "Escribe el <b>nuevo precio</b> en USDT:\n"
+        "<i>Ejemplo: 14.99</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancelar", callback_data="admin_methods")
+        ]])
+    )
+    return WAITING_METHOD_EDIT_PRICE
+
+
+async def admin_method_edit_price_receive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    method_id = context.user_data.pop("edit_method_id", None)
+    if not method_id:
+        await update.message.reply_text("❌ Sesión expirada.")
+        return ConversationHandler.END
+
+    try:
+        new_price = float(update.message.text.strip().replace(",", "."))
+        if new_price <= 0 or new_price > 9999:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("⚠️ Precio inválido. Ej: 14.99")
+        context.user_data["edit_method_id"] = method_id
+        return WAITING_METHOD_EDIT_PRICE
+
+    await db.update_db_method_price(method_id, new_price)
+    await update.message.reply_text(
+        f"✅ <b>Precio actualizado:</b> <code>{method_id}</code> → <b>${new_price:.2f} USDT</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📘 Gestionar Métodos", callback_data="admin_methods")],
+            [InlineKeyboardButton("◀️ Panel admin",       callback_data="admin_panel")],
+        ])
+    )
+    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════════════════════════════════

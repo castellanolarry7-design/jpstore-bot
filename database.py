@@ -169,6 +169,21 @@ async def _create_tables_pg(conn) -> None:
             value TEXT
         )
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS db_methods (
+            id              SERIAL PRIMARY KEY,
+            method_id       TEXT UNIQUE NOT NULL,
+            name            TEXT NOT NULL,
+            emoji           TEXT DEFAULT '⚡',
+            price           REAL NOT NULL,
+            description_en  TEXT DEFAULT '',
+            description_es  TEXT DEFAULT '',
+            delivery_en     TEXT DEFAULT 'Instant',
+            delivery_es     TEXT DEFAULT 'Inmediata',
+            is_active       INTEGER DEFAULT 1,
+            added_at        TIMESTAMP DEFAULT NOW()
+        )
+    """)
     # Safe ALTER TABLE ADD COLUMN IF NOT EXISTS (PG 9.6+)
     for tbl, col, typedef in [
         ("users",    "credits",              "REAL DEFAULT 0.0"),
@@ -281,6 +296,21 @@ async def _create_tables_sqlite(db) -> None:
             value TEXT
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS db_methods (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            method_id       TEXT UNIQUE NOT NULL,
+            name            TEXT NOT NULL,
+            emoji           TEXT DEFAULT '⚡',
+            price           REAL NOT NULL,
+            description_en  TEXT DEFAULT '',
+            description_es  TEXT DEFAULT '',
+            delivery_en     TEXT DEFAULT 'Instant',
+            delivery_es     TEXT DEFAULT 'Inmediata',
+            is_active       INTEGER DEFAULT 1,
+            added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.commit()
     # Safe migrations for existing SQLite DBs
     for tbl, existing_cols_query, col_defs in [
@@ -322,8 +352,9 @@ async def init_db() -> None:
     else:
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await _create_tables_sqlite(db)
-    # Warm up the in-memory products cache
+    # Warm up the in-memory caches
     await refresh_products_cache()
+    await refresh_methods_cache()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -457,6 +488,86 @@ async def delete_db_product(db_id: int) -> bool:
 async def get_all_db_products() -> list[dict]:
     """Return raw product rows (all active) for admin listing."""
     return await _fetch("SELECT * FROM products WHERE is_active=1 ORDER BY added_at ASC")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DYNAMIC METHODS CACHE (DB-backed, merged with static METHODS at runtime)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_methods_cache: dict = {}
+
+
+async def refresh_methods_cache() -> None:
+    """Load active DB methods into the in-memory cache."""
+    global _methods_cache
+    rows = await _fetch("SELECT * FROM db_methods WHERE is_active = 1 ORDER BY added_at ASC")
+    _methods_cache = {}
+    for r in rows:
+        _methods_cache[r["method_id"]] = {
+            "id":          r["method_id"],
+            "name":        r["name"],
+            "emoji":       r["emoji"],
+            "price":       float(r["price"]),
+            "description": {
+                "en": r.get("description_en") or "",
+                "es": r.get("description_es") or "",
+            },
+            "delivery": {
+                "en": r.get("delivery_en") or "Instant",
+                "es": r.get("delivery_es") or "Inmediata",
+            },
+            "_db_id": r["id"],
+        }
+
+
+def get_cached_db_methods() -> dict:
+    """Sync read of the in-memory methods cache."""
+    return dict(_methods_cache)
+
+
+async def create_db_method(
+    name: str, emoji: str, price: float,
+    desc_en: str, desc_es: str,
+    delivery_en: str, delivery_es: str,
+) -> int:
+    """Create a new dynamic method and refresh the cache. Returns the new DB row id."""
+    import re
+    base_mid = re.sub(r"[^a-z0-9]+", "_", name.lower().strip()).strip("_")[:25] or "method"
+    method_id = base_mid
+    from config import METHODS
+    taken = set(METHODS) | set(_methods_cache)
+    suffix = 2
+    while method_id in taken:
+        method_id = f"{base_mid}_{suffix}"[:30]
+        suffix += 1
+    new_id = await _insert_returning("""
+        INSERT INTO db_methods (method_id, name, emoji, price, description_en, description_es,
+                                delivery_en, delivery_es)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id
+    """, method_id, name, emoji, price, desc_en, desc_es, delivery_en, delivery_es)
+    await refresh_methods_cache()
+    return new_id
+
+
+async def update_db_method_price(method_id: str, new_price: float) -> None:
+    """Update a DB method's price."""
+    await _exec("UPDATE db_methods SET price=$1 WHERE method_id=$2", new_price, method_id)
+    await refresh_methods_cache()
+
+
+async def delete_db_method(db_id: int) -> bool:
+    """Soft-delete a dynamic method by DB row id. Returns True if deleted."""
+    row = await _fetchrow("SELECT id FROM db_methods WHERE id=$1 AND is_active=1", db_id)
+    if not row:
+        return False
+    await _exec("UPDATE db_methods SET is_active=0 WHERE id=$1", db_id)
+    await refresh_methods_cache()
+    return True
+
+
+async def get_all_db_methods() -> list[dict]:
+    """Return raw method rows (all active) for admin listing."""
+    return await _fetch("SELECT * FROM db_methods WHERE is_active=1 ORDER BY added_at ASC")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -706,6 +817,27 @@ async def credit_referral(referrer_id: int, referred_id: int) -> bool:
 async def get_referral_count(user_id: int) -> int:
     return (await _fetchval(
         "SELECT COUNT(*) FROM referrals WHERE referrer_id=$1", user_id)) or 0
+
+
+async def get_referrer_id(buyer_id: int) -> int | None:
+    """Return the user_id who referred this buyer (from users.referred_by)."""
+    row = await _fetchrow("SELECT referred_by FROM users WHERE user_id=$1", buyer_id)
+    return row["referred_by"] if row and row["referred_by"] else None
+
+
+async def add_referral_credit(referrer_id: int, buyer_id: int) -> None:
+    """
+    Credit REFERRAL_REWARD to the referrer for a purchase by the referred user.
+    Applies on every purchase (not just the first).
+    Also ensures the referral row is marked credited=1 for stats.
+    """
+    from config import REFERRAL_REWARD
+    await add_credits(referrer_id, REFERRAL_REWARD)
+    # Mark the referral row as credited (idempotent for stats — just sets the flag)
+    await _exec(
+        "UPDATE referrals SET credited=1 WHERE referrer_id=$1 AND referred_id=$2",
+        referrer_id, buyer_id
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

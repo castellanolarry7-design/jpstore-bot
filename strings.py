@@ -511,20 +511,20 @@ STRINGS: dict = {
         ),
     },
     "referral_welcome_bonus": {
-        "en": "🎉 You joined via a referral link! Your friend will earn $1.00 credit when you make your first purchase.",
-        "es": "🎉 ¡Entraste a través de un link de referido! Tu amigo ganará $1.00 de crédito cuando hagas tu primera compra.",
-        "hi": "🎉 आप एक रेफरल लिंक के माध्यम से जुड़े! जब आप अपनी पहली खरीद करेंगे तो आपके दोस्त को $1.00 क्रेडिट मिलेगा।",
-        "id": "🎉 Anda bergabung melalui link referral! Teman Anda akan mendapatkan kredit $1,00 ketika Anda melakukan pembelian pertama.",
-        "ur": "🎉 آپ ریفرل لنک کے ذریعے شامل ہوئے! جب آپ اپنی پہلی خریداری کریں گے تو آپ کے دوست کو $1.00 کریڈٹ ملے گا۔",
-        "zh": "🎉 您通过推荐链接加入！当您完成首次购买时，您的朋友将获得 $1.00 积分。",
+        "en": "🎉 You joined via a referral link! Your friend earns $1.00 credit every time you make a purchase.",
+        "es": "🎉 ¡Entraste a través de un link de referido! Tu amigo gana $1.00 de crédito cada vez que hagas una compra.",
+        "hi": "🎉 आप एक रेफरल लिंक के माध्यम से जुड़े! हर बार जब आप खरीदारी करेंगे तो आपके दोस्त को $1.00 क्रेडिट मिलेगा।",
+        "id": "🎉 Anda bergabung melalui link referral! Teman Anda mendapatkan kredit $1,00 setiap kali Anda melakukan pembelian.",
+        "ur": "🎉 آپ ریفرل لنک کے ذریعے شامل ہوئے! ہر بار جب آپ خریداری کریں گے تو آپ کے دوست کو $1.00 کریڈٹ ملے گا۔",
+        "zh": "🎉 您通过推荐链接加入！您每次购买时，您的朋友将获得 $1.00 积分。",
     },
     "referral_credited": {
-        "en": "💰 <b>+$1.00 credit earned!</b>\nYour referral <b>{name}</b> just made their first purchase. Credit added to your account!",
-        "es": "💰 <b>¡+$1.00 de crédito ganado!</b>\nTu referido <b>{name}</b> acaba de hacer su primera compra. ¡Crédito añadido a tu cuenta!",
-        "hi": "💰 <b>+$1.00 क्रेडिट मिला!</b>\nआपके रेफरल <b>{name}</b> ने अभी अपनी पहली खरीद की। क्रेडिट आपके खाते में जोड़ा गया!",
-        "id": "💰 <b>+$1,00 kredit diperoleh!</b>\nReferral Anda <b>{name}</b> baru saja melakukan pembelian pertama mereka. Kredit ditambahkan ke akun Anda!",
-        "ur": "💰 <b>+$1.00 کریڈٹ ملا!</b>\nآپ کے ریفرل <b>{name}</b> نے ابھی اپنی پہلی خریداری کی۔ کریڈٹ آپ کے اکاؤنٹ میں شامل کر دیا گیا!",
-        "zh": "💰 <b>获得 +$1.00 积分！</b>\n您的推荐人 <b>{name}</b> 刚刚完成了他们的第一次购买。积分已添加到您的账户！",
+        "en": "💰 <b>+$1.00 credit earned!</b>\nYour referral <b>{name}</b> just made a purchase. Credit added to your wallet!",
+        "es": "💰 <b>¡+$1.00 de crédito ganado!</b>\nTu referido <b>{name}</b> acaba de hacer una compra. ¡Crédito añadido a tu cuenta!",
+        "hi": "💰 <b>+$1.00 क्रेडिट मिला!</b>\nआपके रेफरल <b>{name}</b> ने अभी एक खरीद की। क्रेडिट आपके खाते में जोड़ा गया!",
+        "id": "💰 <b>+$1,00 kredit diperoleh!</b>\nReferral Anda <b>{name}</b> baru saja melakukan pembelian. Kredit ditambahkan ke akun Anda!",
+        "ur": "💰 <b>+$1.00 کریڈٹ ملا!</b>\nآپ کے ریفرل <b>{name}</b> نے ابھی ایک خریداری کی۔ کریڈٹ آپ کے اکاؤنٹ میں شامل کر دیا گیا!",
+        "zh": "💰 <b>获得 +$1.00 积分！</b>\n您的推荐人 <b>{name}</b> 刚刚完成了一次购买。积分已添加到您的账户！",
     },
     "btn_copy_link": {
         "en": "📋 Copy Link",
@@ -547,39 +547,33 @@ STRINGS: dict = {
     "support_text": {
         "en": (
             "💬 <b>Support</b>\n\n"
-            "📩 Contact us directly: {username}\n\n"
-            "⏱️ Average response time: <b>under 2 hours</b>\n"
-            "🕐 Hours: Monday–Sunday, 9am–10pm"
+            "📩 Write to us anytime: {username}\n\n"
+            "🕐 Available <b>24/7</b> — we reply as fast as possible!"
         ),
         "es": (
             "💬 <b>Soporte</b>\n\n"
-            "📩 Contáctanos: {username}\n\n"
-            "⏱️ Tiempo de respuesta: <b>menos de 2 horas</b>\n"
-            "🕐 Horario: Lunes a Domingo, 9am – 10pm"
+            "📩 Escríbenos cuando quieras: {username}\n\n"
+            "🕐 Disponible <b>24/7</b> — ¡respondemos lo antes posible!"
         ),
         "hi": (
             "💬 <b>सपोर्ट</b>\n\n"
-            "📩 हमसे संपर्क करें: {username}\n\n"
-            "⏱️ औसत प्रतिक्रिया समय: <b>2 घंटे से कम</b>\n"
-            "🕐 समय: सोमवार–रविवार, सुबह 9 बजे – रात 10 बजे"
+            "📩 कभी भी लिखें: {username}\n\n"
+            "🕐 <b>24/7</b> उपलब्ध — जितनी जल्दी हो सके जवाब देते हैं!"
         ),
         "id": (
             "💬 <b>Dukungan</b>\n\n"
-            "📩 Hubungi kami: {username}\n\n"
-            "⏱️ Waktu respons rata-rata: <b>kurang dari 2 jam</b>\n"
-            "🕐 Jam: Senin–Minggu, 9 pagi – 10 malam"
+            "📩 Tulis kapan saja: {username}\n\n"
+            "🕐 Tersedia <b>24/7</b> — kami membalas secepat mungkin!"
         ),
         "ur": (
             "💬 <b>سپورٹ</b>\n\n"
-            "📩 ہم سے رابطہ کریں: {username}\n\n"
-            "⏱️ اوسط جواب کا وقت: <b>2 گھنٹے سے کم</b>\n"
-            "🕐 اوقات: پیر سے اتوار، صبح 9 بجے – رات 10 بجے"
+            "📩 کسی بھی وقت لکھیں: {username}\n\n"
+            "🕐 <b>24/7</b> دستیاب — جلد از جلد جواب دیتے ہیں!"
         ),
         "zh": (
             "💬 <b>客服</b>\n\n"
-            "📩 联系我们：{username}\n\n"
-            "⏱️ 平均响应时间：<b>2小时以内</b>\n"
-            "🕐 工作时间：周一至周日，早9点 – 晚10点"
+            "📩 随时联系我们：{username}\n\n"
+            "🕐 <b>24/7</b> 全天候在线 — 尽快回复！"
         ),
     },
     "cancelled": {

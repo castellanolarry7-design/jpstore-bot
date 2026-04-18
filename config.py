@@ -40,7 +40,7 @@ TOPUP_AMOUNTS: list[float] = [5.0, 10.0, 20.0, 50.0]
 ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
 # ── Referral reward ───────────────────────────────────────
-REFERRAL_REWARD: float = 1.00   # USD credit per successful referral
+REFERRAL_REWARD: float = 0.50   # USD credit per successful referral
 
 # ── Store info ────────────────────────────────────────────
 STORE_NAME        = "🛒 ReseliBot"

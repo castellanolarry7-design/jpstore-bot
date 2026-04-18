@@ -9,6 +9,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -17,6 +18,7 @@ from database import init_db
 
 # Handlers
 from handlers.start    import start, show_language_selector, set_language, support, check_membership_callback
+from utils.membership  import check_membership_detail, build_gate_message
 from handlers.catalog  import (show_catalog, show_service, show_payment_methods,
                                 show_quantity_selector, qty_control, select_quantity)
 from handlers.methods  import (show_methods, show_method_detail,
@@ -34,7 +36,8 @@ from handlers.balance  import (
     show_balance, show_recargar, recargar_amount,
     initiate_topup_payment, initiate_topup_binance,
     receive_topup_payer_id, cancel_topup,
-    WAITING_TOPUP_PAYER_ID,
+    ask_custom_topup, receive_custom_topup,
+    WAITING_TOPUP_PAYER_ID, WAITING_CUSTOM_TOPUP,
 )
 from handlers.admin    import (
     # Auth
@@ -64,6 +67,14 @@ from handlers.admin    import (
     admin_photo_upload_prompt, admin_photo_receive, admin_photo_delete,
     # Welcome photo command
     cmd_setphoto, receive_welcome_photo,
+    # Method management
+    admin_methods_menu,
+    admin_method_add_start,
+    admin_method_name, admin_method_emoji, admin_method_price,
+    admin_method_desc_en, admin_method_desc_es,
+    admin_method_delivery_en, admin_method_delivery_es,
+    admin_method_confirm, admin_method_cancel, admin_method_del,
+    admin_method_edit_price_start, admin_method_edit_price_receive,
     # Legacy /addstock /stock commands
     cmd_addstock, cmd_stock,
     # States
@@ -73,8 +84,13 @@ from handlers.admin    import (
     WAITING_PROD_DESC_EN, WAITING_PROD_DESC_ES,
     WAITING_PROD_DELIVERY_EN, WAITING_PROD_DELIVERY_ES,
     WAITING_PROD_PHOTO, WAITING_SET_PHOTO, WAITING_WELCOME_PHOTO,
+    WAITING_METHOD_NAME, WAITING_METHOD_EMOJI, WAITING_METHOD_PRICE,
+    WAITING_METHOD_DESC_EN, WAITING_METHOD_DESC_ES,
+    WAITING_METHOD_DELIVERY_EN, WAITING_METHOD_DELIVERY_ES,
+    WAITING_METHOD_EDIT_PRICE,
 )
 from handlers.stats import cmd_estadisticas
+from handlers.membership_middleware import membership_middleware
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -91,6 +107,11 @@ async def post_init(application: Application) -> None:
 
 def build_application() -> Application:
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # GLOBAL MIDDLEWARE — membership gate (group=-1, runs before everything)
+    # ══════════════════════════════════════════════════════════════════════════
+    app.add_handler(TypeHandler(Update, membership_middleware), group=-1)
 
     # ══════════════════════════════════════════════════════════════════════════
     # CONVERSATIONS
@@ -325,6 +346,71 @@ def build_application() -> Application:
     )
     app.add_handler(set_photo_conv)
 
+    # ── Custom top-up amount ──────────────────────────────────────────────────
+    custom_topup_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(ask_custom_topup, pattern=r"^topup_custom$"),
+        ],
+        states={
+            WAITING_CUSTOM_TOPUP: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_topup),
+                CommandHandler("cancel",   cancel_topup),
+                CommandHandler("cancelar", cancel_topup),
+                CallbackQueryHandler(cancel_topup, pattern=r"^cancel_topup$"),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel",   cancel_topup),
+            CommandHandler("cancelar", cancel_topup),
+            CallbackQueryHandler(cancel_topup, pattern=r"^cancel_topup$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(custom_topup_conv)
+
+    # ── Method creation & price-edit (multi-step) ────────────────────────────
+    method_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_method_add_start,       pattern=r"^admin_method_add$"),
+            CallbackQueryHandler(admin_method_edit_price_start, pattern=r"^admin_method_edit_\w+$"),
+        ],
+        states={
+            WAITING_METHOD_NAME:        [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_name),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_EMOJI:       [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_emoji),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_PRICE:       [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_price),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_DESC_EN:     [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_desc_en),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_DESC_ES:     [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_desc_es),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_DELIVERY_EN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_delivery_en),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_DELIVERY_ES: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_delivery_es),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+            WAITING_METHOD_EDIT_PRICE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_method_edit_price_receive),
+                                         CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                                         CallbackQueryHandler(admin_methods_menu, pattern=r"^admin_methods$")],
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_method_cancel, pattern=r"^admin_method_cancel$"),
+            CallbackQueryHandler(admin_panel,         pattern=r"^admin_panel$"),
+            CallbackQueryHandler(admin_methods_menu,  pattern=r"^admin_methods$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(method_conv)
+
     # ══════════════════════════════════════════════════════════════════════════
     # PLAIN COMMANDS
     # ══════════════════════════════════════════════════════════════════════════
@@ -376,6 +462,8 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(show_recargar,           pattern=r"^recargar$"))
     app.add_handler(CallbackQueryHandler(recargar_amount,         pattern=r"^topup_\d+$"))
     app.add_handler(CallbackQueryHandler(initiate_topup_payment,  pattern=r"^topup_pay_(trc20|bep20)_\d+(\.\d+)?$"))
+    # custom amount entry-point fallback (also handled inside custom_topup_conv)
+    app.add_handler(CallbackQueryHandler(ask_custom_topup,        pattern=r"^topup_custom$"))
 
     # ── Referrals ─────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_referrals,         pattern=r"^referrals$"))
@@ -408,6 +496,12 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_static_photos,   pattern=r"^admin_static_photos$"))
     app.add_handler(CallbackQueryHandler(admin_prod_photo_menu, pattern=r"^admin_prod_photo_.+$"))
     app.add_handler(CallbackQueryHandler(admin_photo_delete,    pattern=r"^admin_photo_delete$"))
+
+    # ── Method management ─────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(admin_methods_menu,         pattern=r"^admin_methods$"))
+    app.add_handler(CallbackQueryHandler(admin_method_confirm,       pattern=r"^admin_method_confirm$"))
+    app.add_handler(CallbackQueryHandler(admin_method_cancel,        pattern=r"^admin_method_cancel$"))
+    app.add_handler(CallbackQueryHandler(admin_method_del,           pattern=r"^admin_method_del_\w+$"))
 
     return app
 
