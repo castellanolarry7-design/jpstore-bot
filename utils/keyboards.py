@@ -7,6 +7,32 @@ from strings import t
 import database as db
 
 
+# ── Safe message edit ─────────────────────────────────────────────────────────
+
+async def safe_edit(query, text: str, parse_mode: str = "HTML",
+                    reply_markup=None, disable_web_page_preview: bool = False) -> None:
+    """
+    Edit the current message as text, handling the case where the existing message
+    is a photo (caption-only message).  Telegram rejects edit_message_text on photos
+    with: "There is no text in the message to edit".
+
+    Strategy:
+      1. Try edit_message_text (normal case).
+      2. On any error: delete the current message and send a fresh text message.
+    """
+    kwargs = dict(parse_mode=parse_mode, reply_markup=reply_markup)
+    if disable_web_page_preview:
+        kwargs["disable_web_page_preview"] = True
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.message.chat.send_message(text, **kwargs)
+
+
 def main_menu_kb(lang: str = "en") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(t("btn_catalog",   lang), callback_data="catalog"),

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 from config import STORE_NAME, STORE_DESCRIPTION, SUPPORT_USERNAME, WELCOME_PHOTO_FILE_ID
 import database as db
 from strings import t
-from utils.keyboards import main_menu_kb, language_kb
+from utils.keyboards import main_menu_kb, language_kb, safe_edit
 from utils.notifications import notify_new_user
 from utils.membership import check_membership_detail, check_membership, build_gate_message
 
@@ -221,11 +221,7 @@ async def show_language_selector(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     await query.answer()
     lang = await db.get_user_lang(query.from_user.id)
-    await query.edit_message_text(
-        t("choose_language", lang),
-        parse_mode="HTML",
-        reply_markup=language_kb()
-    )
+    await safe_edit(query, t("choose_language", lang), reply_markup=language_kb())
 
 
 async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -238,8 +234,7 @@ async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = t("welcome", new_lang,
              store_name=STORE_NAME,
              description=STORE_DESCRIPTION)
-    await query.edit_message_text(text, parse_mode="HTML",
-                                  reply_markup=main_menu_kb(new_lang))
+    await safe_edit(query, text, reply_markup=main_menu_kb(new_lang))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -251,9 +246,6 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await query.answer()
     lang  = await db.get_user_lang(query.from_user.id)
     text  = t("support_text", lang, username=SUPPORT_USERNAME)
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t("btn_home", lang), callback_data="home")]
-        ])
-    )
+    await safe_edit(query, text, reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton(t("btn_home", lang), callback_data="home")]
+    ]))

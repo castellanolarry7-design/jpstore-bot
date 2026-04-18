@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 
 import database as db
 from strings import t
-from utils.keyboards import main_menu_kb
+from utils.keyboards import main_menu_kb, safe_edit
 from config import BINANCE_PAY_ID
 
 # Conversation states
@@ -47,7 +47,7 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [InlineKeyboardButton(btn_topup, callback_data="recargar")],
         [InlineKeyboardButton(t("btn_home", lang), callback_data="home")],
     ])
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    await safe_edit(query, text, reply_markup=kb)
 
 
 # ── Show Recargar Amount Picker ───────────────────────────────────────────────
@@ -77,8 +77,7 @@ async def show_recargar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton(custom, callback_data="topup_custom")],
         [InlineKeyboardButton(t("btn_back", lang), callback_data="balance")],
     ])
-    await query.edit_message_text(text, parse_mode="HTML",
-                                  reply_markup=InlineKeyboardMarkup(kb.inline_keyboard))
+    await safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb.inline_keyboard))
 
 
 # ── Custom amount entry ───────────────────────────────────────────────────────
@@ -104,15 +103,12 @@ async def ask_custom_topup(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "Example: <code>15.50</code>"
         )
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(
-                "❌ " + ("Cancel" if lang == "en" else "Cancelar"),
-                callback_data="recargar"
-            )
-        ]])
-    )
+    await safe_edit(query, text, reply_markup=InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "❌ " + ("Cancel" if lang == "en" else "Cancelar"),
+            callback_data="recargar"
+        )
+    ]]))
     return WAITING_CUSTOM_TOPUP
 
 
@@ -183,7 +179,7 @@ async def recargar_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("🟠 Binance Pay",         callback_data=f"topup_pay_binance_{amount_str}")],
         [InlineKeyboardButton(t("btn_back", lang),       callback_data="recargar")],
     ])
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    await safe_edit(query, text, reply_markup=kb)
 
 
 # ── Initiate Top-Up Payment (TRC20 / BEP20) ──────────────────────────────────
@@ -244,7 +240,7 @@ async def initiate_topup_payment(update: Update, context: ContextTypes.DEFAULT_T
         )],
         [InlineKeyboardButton(t("btn_cancel", lang), callback_data=f"cancel_{order_id}")],
     ])
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+    await safe_edit(query, text, reply_markup=kb)
 
     await db.save_instruction_message(order_id, chat_id=query.message.chat_id,
                                        msg_id=query.message.message_id)

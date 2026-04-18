@@ -7,6 +7,7 @@ from config import METHODS, USDT_TRC20, USDT_BEP20, BINANCE_PAY_ENABLED, BINANCE
 import database as db
 from strings import t
 from utils.notifications import notify_admins_new_order
+from utils.keyboards import safe_edit
 from handlers.orders import WAITING_PAYER_ID
 
 
@@ -68,11 +69,8 @@ async def show_methods(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await query.answer()
 
     lang = await db.get_user_lang(query.from_user.id)
-    await query.edit_message_text(
-        t("methods_title", lang),
-        parse_mode="HTML",
-        reply_markup=methods_catalog_kb(lang)
-    )
+    await safe_edit(query, t("methods_title", lang),
+                    reply_markup=methods_catalog_kb(lang))
 
 
 # ── Show method detail ────────────────────────────────────────────────────────
@@ -98,10 +96,7 @@ async def show_method_detail(update: Update, context: ContextTypes.DEFAULT_TYPE)
              price=f"${method['price']:.2f} USDT",
              delivery=delivery)
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=method_detail_kb(method_id, lang)
-    )
+    await safe_edit(query, text, reply_markup=method_detail_kb(method_id, lang))
 
 
 # ── Show payment options for method ──────────────────────────────────────────
@@ -125,11 +120,9 @@ async def show_method_payment(update: Update, context: ContextTypes.DEFAULT_TYPE
              name=method["name"],
              price=f"{method['price']:.2f}")
 
-    await query.edit_message_text(
-        text, parse_mode="HTML",
-        reply_markup=method_payment_kb(method_id, lang,
-                                       user_credits=user_credits, total_price=method["price"])
-    )
+    await safe_edit(query, text,
+                    reply_markup=method_payment_kb(method_id, lang,
+                                                   user_credits=user_credits, total_price=method["price"]))
 
 
 # ── Initiate method payment ───────────────────────────────────────────────────

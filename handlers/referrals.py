@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from config import BOT_USERNAME, REFERRAL_REWARD
 import database as db
 from strings import t
+from utils.keyboards import safe_edit
 
 
 async def show_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -32,8 +33,7 @@ async def show_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [InlineKeyboardButton(t("btn_home", lang), callback_data="home")],
     ])
 
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=kb,
-                                  disable_web_page_preview=True)
+    await safe_edit(query, text, reply_markup=kb, disable_web_page_preview=True)
 
 
 async def process_referral_start(bot, referrer_code: str, new_user: dict) -> None:

@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filt
 from config import SERVICES, USDT_TRC20, USDT_BEP20, BINANCE_PAY_ENABLED, BINANCE_PAY_ID
 import database as db
 from strings import t
-from utils.keyboards import order_confirm_kb, back_to_orders_kb, main_menu_kb
+from utils.keyboards import order_confirm_kb, back_to_orders_kb, main_menu_kb, safe_edit
 from utils.notifications import notify_admins_new_order, notify_order_status
 
 WAITING_PROOF     = 1
@@ -443,8 +443,7 @@ async def request_proof(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     context.user_data["pending_order_id"] = order_id
     context.user_data["pending_lang"] = lang
 
-    await query.edit_message_text(
-        t("send_proof", lang, order_id=order_id), parse_mode="HTML")
+    await safe_edit(query, t("send_proof", lang, order_id=order_id))
     return WAITING_PROOF
 
 
@@ -507,8 +506,8 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     orders = await db.get_user_orders(query.from_user.id)
 
     if not orders:
-        await query.edit_message_text(
-            t("my_orders_empty", lang), parse_mode="HTML",
+        await safe_edit(
+            query, t("my_orders_empty", lang),
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(t("btn_catalog", lang), callback_data="catalog")],
                 [InlineKeyboardButton(t("btn_home",    lang), callback_data="home")],
@@ -534,8 +533,8 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"   💵 ${o['amount']:.2f} | {label} | {o['created_at'][:10]}\n"
         )
 
-    await query.edit_message_text(
-        "\n".join(lines), parse_mode="HTML",
+    await safe_edit(
+        query, "\n".join(lines),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(t("btn_home", lang), callback_data="home")]
         ])
