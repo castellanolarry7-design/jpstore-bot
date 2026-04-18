@@ -6,7 +6,7 @@ load_dotenv()
 # ── Telegram ──────────────────────────────────────────────
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS: list[int] = [int(x) for x in os.getenv("ADMIN_ID", "0").split(",") if x.strip()]
-BOT_USERNAME: str = os.getenv("BOT_USERNAME", "JPStoreBot")  # set via @BotFather
+BOT_USERNAME: str = os.getenv("BOT_USERNAME", "ReseliBotStore")  # set via @BotFather
 
 # ── Wallets Crypto ────────────────────────────────────────
 USDT_TRC20: str = os.getenv("USDT_TRC20_ADDRESS", "")
@@ -43,9 +43,18 @@ ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 REFERRAL_REWARD: float = 1.00   # USD credit per successful referral
 
 # ── Store info ────────────────────────────────────────────
-STORE_NAME        = "🛒 JPStore AI"
+STORE_NAME        = "🛒 ReseliBot"
 STORE_DESCRIPTION = "Your premium AI services & methods store"
 SUPPORT_USERNAME  = "@xpsolidity"
+
+# ── Membership gate ───────────────────────────────────────────────────────────
+# The bot must be admin in both to check members. Set to "" to disable.
+REQUIRED_GROUP   = os.getenv("REQUIRED_GROUP",   "@ReseliBotGroup")
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@ReseliBotChannel")
+
+# ── Welcome image ─────────────────────────────────────────────────────────────
+# Set this in .env after uploading your image once (see README for instructions)
+WELCOME_PHOTO_FILE_ID: str = os.getenv("WELCOME_PHOTO_FILE_ID", "")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SERVICES CATALOG

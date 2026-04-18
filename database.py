@@ -163,6 +163,12 @@ async def _create_tables_pg(conn) -> None:
             added_at     TIMESTAMP DEFAULT NOW()
         )
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     # Safe ALTER TABLE ADD COLUMN IF NOT EXISTS (PG 9.6+)
     for tbl, col, typedef in [
         ("users",    "credits",              "REAL DEFAULT 0.0"),
@@ -267,6 +273,12 @@ async def _create_tables_sqlite(db) -> None:
             order_id     INTEGER,
             delivered_at TIMESTAMP,
             added_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS bot_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT
         )
     """)
     await db.commit()
@@ -801,3 +813,134 @@ async def get_all_stock_summary() -> list[dict]:
                SUM(CASE WHEN delivered=1 THEN 1 ELSE 0 END) AS delivered
         FROM stock GROUP BY service_id ORDER BY service_id
     """)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BOT CONFIG (key-value store for persistent bot settings)
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def get_bot_config(key: str) -> str | None:
+    """Read a persistent bot config value (e.g. welcome_photo_file_id)."""
+    row = await _fetchrow("SELECT value FROM bot_config WHERE key=$1", key)
+    return row["value"] if row else None
+
+
+async def set_bot_config(key: str, value: str) -> None:
+    """Write/update a persistent bot config value."""
+    if _USE_PG:
+        await _exec("""
+            INSERT INTO bot_config (key, value) VALUES ($1, $2)
+            ON CONFLICT (key) DO UPDATE SET value = $2
+        """, key, value)
+    else:
+        await _exec("""
+            INSERT OR REPLACE INTO bot_config (key, value) VALUES ($1, $2)
+        """, key, value)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FULL STATISTICS  (for /estadisticas command)
+# ═════════════════════════════════════════════════════════════════════════════
+
+async def get_full_stats() -> dict:
+    """Comprehensive statistics for admin /estadisticas command."""
+    s = {}
+
+    # ── Users ─────────────────────────────────────────────────────────────────
+    s["total_users"]  = await _fetchval("SELECT COUNT(*) FROM users") or 0
+    s["banned_users"] = await _fetchval("SELECT COUNT(*) FROM users WHERE is_banned=1") or 0
+    s["total_credits"] = await _fetchval("SELECT COALESCE(SUM(credits),0) FROM users") or 0.0
+
+    if _USE_PG:
+        s["new_today"] = await _fetchval(
+            "SELECT COUNT(*) FROM users WHERE joined_at >= NOW() - INTERVAL '1 day'") or 0
+        s["new_week"]  = await _fetchval(
+            "SELECT COUNT(*) FROM users WHERE joined_at >= NOW() - INTERVAL '7 days'") or 0
+        s["new_month"] = await _fetchval(
+            "SELECT COUNT(*) FROM users WHERE joined_at >= NOW() - INTERVAL '30 days'") or 0
+    else:
+        s["new_today"] = await _fetchval(
+            "SELECT COUNT(*) FROM users WHERE datetime(joined_at) >= datetime('now','-1 day')") or 0
+        s["new_week"]  = await _fetchval(
+            "SELECT COUNT(*) FROM users WHERE datetime(joined_at) >= datetime('now','-7 days')") or 0
+        s["new_month"] = await _fetchval(
+            "SELECT COUNT(*) FROM users WHERE datetime(joined_at) >= datetime('now','-30 days')") or 0
+
+    lang_rows = await _fetch(
+        "SELECT lang, COUNT(*) AS cnt FROM users GROUP BY lang ORDER BY cnt DESC")
+    s["langs"] = [(r["lang"], r["cnt"]) for r in lang_rows]
+
+    # ── Orders ────────────────────────────────────────────────────────────────
+    s["total_orders"]     = await _fetchval(
+        "SELECT COUNT(*) FROM orders WHERE item_type != 'topup'") or 0
+    s["pending_orders"]   = await _fetchval(
+        "SELECT COUNT(*) FROM orders WHERE status IN ('pending','paid') AND item_type!='topup'") or 0
+    s["delivered_orders"] = await _fetchval(
+        "SELECT COUNT(*) FROM orders WHERE status='delivered' AND item_type!='topup'") or 0
+    s["cancelled_orders"] = await _fetchval(
+        "SELECT COUNT(*) FROM orders WHERE status='cancelled' AND item_type!='topup'") or 0
+
+    s["total_revenue"] = await _fetchval(
+        "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' AND item_type!='topup'") or 0.0
+
+    if _USE_PG:
+        s["today_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= NOW() - INTERVAL '1 day'") or 0.0
+        s["week_revenue"]  = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= NOW() - INTERVAL '7 days'") or 0.0
+        s["month_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND created_at >= NOW() - INTERVAL '30 days'") or 0.0
+    else:
+        s["today_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND datetime(created_at) >= datetime('now','-1 day')") or 0.0
+        s["week_revenue"]  = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND datetime(created_at) >= datetime('now','-7 days')") or 0.0
+        s["month_revenue"] = await _fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM orders WHERE status='delivered' "
+            "AND item_type!='topup' AND datetime(created_at) >= datetime('now','-30 days')") or 0.0
+
+    s["avg_order"] = (
+        s["total_revenue"] / s["delivered_orders"]
+        if s["delivered_orders"] > 0 else 0.0
+    )
+
+    # Payment method breakdown
+    pm_rows = await _fetch(
+        "SELECT payment_method, COUNT(*) AS cnt FROM orders "
+        "WHERE status='delivered' AND item_type!='topup' "
+        "GROUP BY payment_method ORDER BY cnt DESC")
+    s["payment_methods"] = [(r["payment_method"], r["cnt"]) for r in pm_rows]
+
+    # Top 5 best-selling products
+    top_rows = await _fetch(
+        "SELECT service_id, COUNT(*) AS cnt FROM orders "
+        "WHERE status='delivered' AND item_type!='topup' "
+        "GROUP BY service_id ORDER BY cnt DESC LIMIT 5")
+    s["top_products"] = [(r["service_id"], r["cnt"]) for r in top_rows]
+
+    # ── Top-ups ───────────────────────────────────────────────────────────────
+    s["total_topups"]  = await _fetchval(
+        "SELECT COUNT(*) FROM orders WHERE item_type='topup' AND status='delivered'") or 0
+    s["topup_revenue"] = await _fetchval(
+        "SELECT COALESCE(SUM(amount),0) FROM orders "
+        "WHERE item_type='topup' AND status='delivered'") or 0.0
+
+    # ── Referrals ─────────────────────────────────────────────────────────────
+    s["total_referrals"]    = await _fetchval("SELECT COUNT(*) FROM referrals") or 0
+    s["credited_referrals"] = await _fetchval(
+        "SELECT COUNT(*) FROM referrals WHERE credited=1") or 0
+    s["referral_credits_given"] = await _fetchval(
+        "SELECT COUNT(*) * 1.0 FROM referrals WHERE credited=1") or 0.0
+
+    # ── Stock ─────────────────────────────────────────────────────────────────
+    s["total_stock"]    = await _fetchval(
+        "SELECT COUNT(*) FROM stock WHERE delivered=0") or 0
+    s["stock_services"] = await _fetchval(
+        "SELECT COUNT(DISTINCT service_id) FROM stock WHERE delivered=0") or 0
+
+    return s

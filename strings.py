@@ -1,7 +1,7 @@
 """
 strings.py – Multilingual text system (English / Spanish / Hindi / Indonesian / Urdu / Chinese)
 Usage: from strings import t
-       t('welcome', lang, store_name="JPStore")
+       t('welcome', lang, store_name="ReseliBot")
 """
 
 STRINGS: dict = {

@@ -1,5 +1,5 @@
 """
-bot.py – JPStore Bot entry point
+bot.py – ReseliBot entry point
 """
 import logging
 from telegram import Update
@@ -16,7 +16,7 @@ from config import BOT_TOKEN
 from database import init_db
 
 # Handlers
-from handlers.start    import start, show_language_selector, set_language, support
+from handlers.start    import start, show_language_selector, set_language, support, check_membership_callback
 from handlers.catalog  import (show_catalog, show_service, show_payment_methods,
                                 show_quantity_selector, qty_control, select_quantity)
 from handlers.methods  import (show_methods, show_method_detail,
@@ -62,6 +62,8 @@ from handlers.admin    import (
     # Photo management
     admin_static_photos, admin_prod_photo_menu,
     admin_photo_upload_prompt, admin_photo_receive, admin_photo_delete,
+    # Welcome photo command
+    cmd_setphoto, receive_welcome_photo,
     # Legacy /addstock /stock commands
     cmd_addstock, cmd_stock,
     # States
@@ -70,8 +72,9 @@ from handlers.admin    import (
     WAITING_PROD_NAME, WAITING_PROD_EMOJI, WAITING_PROD_PRICE,
     WAITING_PROD_DESC_EN, WAITING_PROD_DESC_ES,
     WAITING_PROD_DELIVERY_EN, WAITING_PROD_DELIVERY_ES,
-    WAITING_PROD_PHOTO, WAITING_SET_PHOTO,
+    WAITING_PROD_PHOTO, WAITING_SET_PHOTO, WAITING_WELCOME_PHOTO,
 )
+from handlers.stats import cmd_estadisticas
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -83,7 +86,7 @@ logger = logging.getLogger(__name__)
 async def post_init(application: Application) -> None:
     await init_db()
     logger.info("✅ Database initialized.")
-    logger.info("🤖 JPStore Bot started.")
+    logger.info("🤖 ReseliBot started.")
 
 
 def build_application() -> Application:
@@ -284,6 +287,24 @@ def build_application() -> Application:
     )
     app.add_handler(product_create_conv)
 
+    # ── /setphoto — set the bot welcome image ────────────────────────────────
+    setphoto_conv = ConversationHandler(
+        entry_points=[CommandHandler("setphoto", cmd_setphoto)],
+        states={
+            WAITING_WELCOME_PHOTO: [
+                MessageHandler(filters.PHOTO, receive_welcome_photo),
+                CommandHandler("cancel",   admin_cancel_conv),
+                CommandHandler("cancelar", admin_cancel_conv),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(setphoto_conv)
+
     # ── Set photo for existing product (static or dynamic) ────────────────────
     set_photo_conv = ConversationHandler(
         entry_points=[
@@ -308,13 +329,17 @@ def build_application() -> Application:
     # PLAIN COMMANDS
     # ══════════════════════════════════════════════════════════════════════════
 
-    app.add_handler(CommandHandler("start",    start))
-    app.add_handler(CommandHandler("addstock", cmd_addstock))
-    app.add_handler(CommandHandler("stock",    cmd_stock))
+    app.add_handler(CommandHandler("start",         start))
+    app.add_handler(CommandHandler("addstock",      cmd_addstock))
+    app.add_handler(CommandHandler("stock",         cmd_stock))
+    app.add_handler(CommandHandler("estadisticas",  cmd_estadisticas))  # hidden admin command
 
     # ══════════════════════════════════════════════════════════════════════════
     # CALLBACK QUERY HANDLERS
     # ══════════════════════════════════════════════════════════════════════════
+
+    # ── Membership gate ───────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(check_membership_callback, pattern=r"^check_membership$"))
 
     # ── Navigation ────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(start,                  pattern=r"^home$"))
@@ -391,7 +416,7 @@ def main() -> None:
     if not BOT_TOKEN:
         raise ValueError("❌ BOT_TOKEN not configured. Check your .env file.")
     app = build_application()
-    logger.info("🚀 Starting JPStore Bot...")
+    logger.info("🚀 Starting ReseliBot...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

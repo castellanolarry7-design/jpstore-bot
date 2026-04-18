@@ -61,13 +61,13 @@ async def create_payment(
           "expire_time":  int,   # Timestamp de expiración (ms)
         }
     """
-    merchant_order_no = f"JPSTORE-{order_id}-{int(time.time())}"
+    merchant_order_no = f"RESELI-{order_id}-{int(time.time())}"
     payload = {
         "env": {"terminalType": "APP"},
         "merchantTradeNo": merchant_order_no,
         "orderAmount": round(amount, 2),
         "currency": currency,
-        "description": f"JPStore - {service_name}",
+        "description": f"ReseliBot - {service_name}",
         "goods": {
             "goodsType": "02",           # 02 = digital goods
             "goodsCategory": "Z000",

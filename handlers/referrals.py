@@ -26,7 +26,7 @@ async def show_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 " + ("Share" if lang == "en" else "Compartir"),
-                              url=f"https://t.me/share/url?url={link}&text={'Check+out+JPStore+AI!' if lang=='en' else '¡Mira+JPStore+AI!'}"),
+                              url=f"https://t.me/share/url?url={link}&text={'Check+out+ReseliBot!' if lang=='en' else '¡Mira+ReseliBot!'}"),
         ],
         [InlineKeyboardButton(t("btn_home", lang), callback_data="home")],
     ])

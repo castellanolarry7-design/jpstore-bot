@@ -35,6 +35,9 @@ WAITING_PROD_PHOTO       = 47   # optional image upload step
 # Photo management state (for existing products)
 WAITING_SET_PHOTO = 48
 
+# Welcome photo state (for /setphoto command)
+WAITING_WELCOME_PHOTO = 49
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HELPERS
@@ -126,7 +129,7 @@ async def admin_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     # Not yet authenticated — ask password
     await update.message.reply_text(
-        "🔐 <b>Panel Admin — JPStore</b>\n\n"
+        "🔐 <b>Panel Admin — ReseliBot</b>\n\n"
         "Ingresa la contraseña de administrador:",
         parse_mode="HTML"
     )
@@ -407,7 +410,7 @@ async def admin_broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             await context.bot.send_message(
                 chat_id=user["user_id"],
-                text=f"📢 <b>Mensaje de JPStore</b>\n\n{message_text}",
+                text=f"📢 <b>Mensaje de ReseliBot</b>\n\n{message_text}",
                 parse_mode="HTML"
             )
             sent += 1
@@ -1233,6 +1236,68 @@ async def admin_product_del(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     else:
         await query.answer("❌ Producto no encontrado.", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /setphoto — Set the bot welcome photo (admin command, no panel auth required)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def cmd_setphoto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    /setphoto — Admin command to set the bot's welcome image.
+    Does not require panel password; ADMIN_IDS check is sufficient.
+    """
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    # Show current photo if set
+    current = await db.get_bot_config("welcome_photo_file_id")
+    if current:
+        try:
+            await update.message.reply_photo(
+                photo=current,
+                caption=(
+                    "📸 <b>Foto de bienvenida actual</b>\n\n"
+                    "Envía una nueva imagen para reemplazarla, "
+                    "o /cancel para salir sin cambios."
+                ),
+                parse_mode="HTML",
+            )
+            return WAITING_WELCOME_PHOTO
+        except Exception:
+            pass
+
+    await update.message.reply_text(
+        "📸 <b>Configurar foto de bienvenida</b>\n\n"
+        "Envía la imagen que quieres mostrar al arrancar el bot con /start.\n\n"
+        "Usa /cancel para salir sin cambios.",
+        parse_mode="HTML",
+    )
+    return WAITING_WELCOME_PHOTO
+
+
+async def receive_welcome_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Receives and persists the new welcome photo file_id to DB config."""
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    if not update.message.photo:
+        await update.message.reply_text("⚠️ Envía una imagen (foto). /cancel para salir.")
+        return WAITING_WELCOME_PHOTO
+
+    file_id = update.message.photo[-1].file_id
+    await db.set_bot_config("welcome_photo_file_id", file_id)
+
+    await update.message.reply_photo(
+        photo=file_id,
+        caption=(
+            "✅ <b>Foto de bienvenida actualizada.</b>\n\n"
+            "Los usuarios verán esta imagen al iniciar el bot con /start.\n\n"
+            f"<code>{file_id}</code>"
+        ),
+        parse_mode="HTML",
+    )
+    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════════════════════════════════

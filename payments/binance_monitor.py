@@ -5,7 +5,7 @@ Uses the personal Binance API (not merchant) to poll incoming pay transactions.
 How to get API keys:
 1. Go to https://www.binance.com/en/my/settings/api-management
 2. Click "Create API" → choose "System generated"
-3. Label it: "JPStoreX Bot"
+3. Label it: "ReseliBot"
 4. Enable ONLY: ✅ "Enable Reading"  (DO NOT enable trading or withdrawals)
 5. Save API Key and Secret to your .env as BINANCE_API_KEY / BINANCE_API_SECRET
 
