@@ -1084,63 +1084,81 @@ async def admin_product_cancel(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def admin_prod_photo_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
+    Entry point of set_photo_conv.
     Callback: admin_prod_photo_<service_id>
-    Shows the photo management menu for a specific product.
+    Stores the target service, shows the current photo (if any), then immediately
+    prompts the admin to send a new photo → enters WAITING_SET_PHOTO.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        await query.answer("🔐 Sesión expirada. Usa /weboadmin.", show_alert=True)
+        return ConversationHandler.END
+
+    service_id = query.data[len("admin_prod_photo_"):]
+    context.user_data["photo_target_sid"] = service_id
+
+    # Resolve product label
+    all_s = _all_services()
+    svc = all_s.get(service_id)
+    svc_label = f"{svc['emoji']} {svc['name']}" if svc else service_id
+
+    # Check for existing photo
+    current_photo = await db.get_service_photo(service_id)
+
+    cancel_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑️ Quitar imagen actual", callback_data=f"admin_photo_delete_{service_id}")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="admin_products")],
+    ]) if current_photo else InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancelar", callback_data="admin_products")],
+    ])
+
+    prompt = (
+        f"📸 <b>Imagen para:</b> {svc_label}\n\n"
+        + ("✅ <b>Ya tiene imagen.</b> Envía una foto nueva para reemplazarla.\n\n"
+           if current_photo else
+           "⚠️ <b>Sin imagen.</b> Envía una foto ahora.\n\n")
+        + "📌 Envía directamente la <b>foto</b> (no como archivo).\n"
+          "/cancelar para abortar."
+    )
+
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+    if current_photo:
+        # Show existing photo first, then add prompt below it
+        try:
+            await query.message.chat.send_photo(
+                photo=current_photo,
+                caption=prompt,
+                parse_mode="HTML",
+                reply_markup=cancel_kb,
+            )
+        except Exception:
+            # file_id stale (old bot token) — fall back to text
+            await query.message.chat.send_message(prompt, parse_mode="HTML", reply_markup=cancel_kb)
+    else:
+        await query.message.chat.send_message(prompt, parse_mode="HTML", reply_markup=cancel_kb)
+
+    return WAITING_SET_PHOTO
+
+
+async def admin_photo_upload_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Legacy re-entry: admin_photo_upload_prompt callback (kept for any stale buttons).
+    Re-uses photo_target_sid already stored in user_data.
     """
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
         return ConversationHandler.END
 
-    service_id = query.data[len("admin_prod_photo_"):]
-    context.user_data["photo_target_sid"] = service_id
-
-    # Get current photo
-    current_photo = await db.get_service_photo(service_id)
-
-    # Find product name
-    all_s = _all_services()
-    svc = all_s.get(service_id)
-    svc_label = f"{svc['emoji']} {svc['name']}" if svc else service_id
-
-    has_photo = bool(current_photo)
-    btns = [
-        [InlineKeyboardButton("📸 Subir / cambiar imagen", callback_data="admin_photo_upload_prompt")],
-    ]
-    if has_photo:
-        btns.append([InlineKeyboardButton("🗑️ Quitar imagen", callback_data="admin_photo_delete")])
-    btns.append([InlineKeyboardButton("◀️ Gestionar Productos", callback_data="admin_products")])
-
-    text = (
-        f"🖼️ <b>Imagen para:</b> {svc_label}\n\n"
-        + ("✅ Este producto <b>tiene</b> imagen asignada.\n" if has_photo
-           else "⚠️ Este producto <b>no tiene</b> imagen.\n")
-    )
-
-    if has_photo:
-        try:
-            await query.message.delete()
-            await query.message.chat.send_photo(
-                photo=current_photo,
-                caption=text,
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(btns)
-            )
-        except Exception:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
-    else:
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(btns))
-    return ConversationHandler.END
-
-
-async def admin_photo_upload_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Callback: prompts the admin to send a photo."""
-    query = update.callback_query
-    await query.answer()
     service_id = context.user_data.get("photo_target_sid", "")
     all_s = _all_services()
     svc = all_s.get(service_id)
-    svc_label = f"{svc['emoji']} {svc['name']}" if svc else service_id
+    svc_label = f"{svc['emoji']} {svc['name']}" if svc else (service_id or "producto")
 
     try:
         await query.message.delete()
@@ -1148,39 +1166,49 @@ async def admin_photo_upload_prompt(update: Update, context: ContextTypes.DEFAUL
         pass
     await query.message.chat.send_message(
         f"📸 <b>Envía la imagen para:</b> {svc_label}\n\n"
-        "Envía una foto (no archivo) directamente en este chat.\n"
+        "Envía la foto directamente (no como archivo).\n"
         "/cancelar para abortar.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Cancelar", callback_data="admin_panel")
+            InlineKeyboardButton("❌ Cancelar", callback_data="admin_products")
         ]])
     )
     return WAITING_SET_PHOTO
 
 
 async def admin_photo_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """MessageHandler: receives the photo and saves it."""
-    if not update.message.photo:
-        await update.message.reply_text("⚠️ Debes enviar una imagen. Inténtalo de nuevo.")
+    """MessageHandler: receives the photo and saves it to the DB."""
+    # Accept both compressed photos and images sent as documents
+    photo = None
+    if update.message.photo:
+        photo = update.message.photo[-1].file_id
+    elif update.message.document and update.message.document.mime_type and \
+            update.message.document.mime_type.startswith("image/"):
+        photo = update.message.document.file_id
+
+    if not photo:
+        await update.message.reply_text(
+            "⚠️ Eso no es una imagen. Envía la foto directamente (no como archivo comprimido).\n"
+            "Si la enviaste como documento, inténtalo sin marcar 'Enviar sin comprimir'."
+        )
         return WAITING_SET_PHOTO
 
     service_id = context.user_data.get("photo_target_sid")
     if not service_id:
-        await update.message.reply_text("❌ Sesión expirada. Vuelve al panel.")
+        await update.message.reply_text("❌ Sesión expirada. Vuelve al panel con /weboadmin.")
         return ConversationHandler.END
 
-    file_id = update.message.photo[-1].file_id
-    await db.set_service_photo(service_id, file_id)
+    await db.set_service_photo(service_id, photo)
 
     all_s = _all_services()
     svc = all_s.get(service_id)
     svc_label = f"{svc['emoji']} {svc['name']}" if svc else service_id
 
     await update.message.reply_photo(
-        photo=file_id,
+        photo=photo,
         caption=(
             f"✅ <b>Imagen guardada para:</b> {svc_label}\n\n"
-            "Los usuarios verán esta imagen al seleccionar el producto."
+            "Los usuarios verán esta imagen al abrir el producto."
         ),
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
@@ -1193,22 +1221,38 @@ async def admin_photo_receive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def admin_photo_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Callback: removes the photo from a product."""
+    """
+    Callback: admin_photo_delete_<service_id>
+    Removes the photo for the given product without requiring a conversation state.
+    """
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
         return
 
-    service_id = context.user_data.pop("photo_target_sid", None)
+    # Service ID is embedded in the callback data: admin_photo_delete_<sid>
+    raw = query.data  # e.g. "admin_photo_delete_gemini_pro_1m"
+    prefix = "admin_photo_delete_"
+    service_id = raw[len(prefix):] if raw.startswith(prefix) else None
+
+    # Fall back to user_data if no service_id in callback (stale button)
+    if not service_id:
+        service_id = context.user_data.pop("photo_target_sid", None)
+    else:
+        context.user_data.pop("photo_target_sid", None)
+
     if service_id:
         await db.delete_service_photo(service_id)
+        msg = "🗑️ <b>Imagen eliminada.</b>\n\nEl producto ya no mostrará foto."
+    else:
+        msg = "⚠️ No se pudo identificar el producto. Vuelve al panel."
 
     try:
         await query.message.delete()
     except Exception:
         pass
     await query.message.chat.send_message(
-        "🗑️ <b>Imagen eliminada.</b>\n\nEl producto ya no mostrará foto.",
+        msg,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🛍️ Gestionar Productos", callback_data="admin_products")],

@@ -16,6 +16,7 @@ from telegram import Update
 from telegram.ext import ContextTypes, ApplicationHandlerStop
 
 import database as db
+from config import ADMIN_IDS
 from utils.membership import check_membership_detail, build_gate_message
 from handlers.start import _get_welcome_photo, _send_gate, _edit_gate
 
@@ -79,6 +80,10 @@ async def membership_middleware(update: Update, context: ContextTypes.DEFAULT_TY
         return  # no user context — let it pass
 
     user_id = user.id
+
+    # Admins are always allowed through — never gate them
+    if user_id in ADMIN_IDS:
+        return
 
     # Whitelisted updates always pass
     if _is_whitelisted(update):

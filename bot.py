@@ -327,20 +327,29 @@ def build_application() -> Application:
     app.add_handler(setphoto_conv)
 
     # ── Set photo for existing product (static or dynamic) ────────────────────
+    # Entry point: clicking any "📷 Foto" product button → admin_prod_photo_menu
+    # which stores photo_target_sid, shows current photo, and enters WAITING_SET_PHOTO.
     set_photo_conv = ConversationHandler(
         entry_points=[
+            # Main entry: admin clicks photo button for any product
+            CallbackQueryHandler(admin_prod_photo_menu,    pattern=r"^admin_prod_photo_.+$"),
+            # Legacy re-entry: "Subir / cambiar" from any stale message
             CallbackQueryHandler(admin_photo_upload_prompt, pattern=r"^admin_photo_upload_prompt$"),
         ],
         states={
             WAITING_SET_PHOTO: [
-                MessageHandler(filters.PHOTO, admin_photo_receive),
-                CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+                # Accept both compressed photos AND images sent as documents
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, admin_photo_receive),
+                # Allow cancellation via button
+                CallbackQueryHandler(admin_products, pattern=r"^admin_products$"),
+                CallbackQueryHandler(admin_panel,    pattern=r"^admin_panel$"),
             ],
         },
         fallbacks=[
             CommandHandler("cancel",   admin_cancel_conv),
             CommandHandler("cancelar", admin_cancel_conv),
-            CallbackQueryHandler(admin_panel, pattern=r"^admin_panel$"),
+            CallbackQueryHandler(admin_products, pattern=r"^admin_products$"),
+            CallbackQueryHandler(admin_panel,    pattern=r"^admin_panel$"),
         ],
         allow_reentry=True,
     )
@@ -494,8 +503,9 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_product_del,     pattern=r"^admin_prod_del_\d+$"))
     # Photo management
     app.add_handler(CallbackQueryHandler(admin_static_photos,   pattern=r"^admin_static_photos$"))
-    app.add_handler(CallbackQueryHandler(admin_prod_photo_menu, pattern=r"^admin_prod_photo_.+$"))
-    app.add_handler(CallbackQueryHandler(admin_photo_delete,    pattern=r"^admin_photo_delete$"))
+    # admin_prod_photo_menu is the entry point of set_photo_conv (registered above)
+    # admin_photo_delete now embeds service_id: admin_photo_delete_<sid>
+    app.add_handler(CallbackQueryHandler(admin_photo_delete,    pattern=r"^admin_photo_delete_.+$"))
 
     # ── Method management ─────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(admin_methods_menu,         pattern=r"^admin_methods$"))
