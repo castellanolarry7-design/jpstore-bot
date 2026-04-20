@@ -68,6 +68,8 @@ from handlers.admin    import (
     admin_photo_upload_prompt, admin_photo_receive, admin_photo_delete,
     # Welcome photo command
     cmd_setphoto, receive_welcome_photo,
+    # Simulate delivery preview
+    admin_sim_pick, admin_sim_preview,
     # DB product editing
     admin_prod_edit_menu,
     admin_prod_edit_field_start, admin_prod_edit_receive,
@@ -578,6 +580,10 @@ def build_application() -> Application:
     # Static product/method override edit (non-conv menu screens)
     app.add_handler(CallbackQueryHandler(admin_static_edit_list, pattern=r"^admin_static_edit_list$"))
     app.add_handler(CallbackQueryHandler(admin_static_edit_menu, pattern=r"^admin_sedit_.+$"))
+
+    # ── Simulate delivery ─────────────────────────────────────────────────────
+    app.add_handler(CallbackQueryHandler(admin_sim_pick,    pattern=r"^admin_sim_pick$"))
+    app.add_handler(CallbackQueryHandler(admin_sim_preview, pattern=r"^admin_sim_.+$"))
 
     # ── Method management ─────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(admin_methods_menu,         pattern=r"^admin_methods$"))

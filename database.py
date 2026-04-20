@@ -546,40 +546,54 @@ async def set_service_sort_order(service_id: str, order: int) -> None:
 
 async def move_catalog_order(service_id: str, direction: str) -> bool:
     """
-    Move service_id one step up or down in the catalog order.
+    Move service_id exactly ONE position up or down in the catalog order.
     Returns True if the swap happened, False if already at boundary.
+
+    Key rule: before any move, ALL items are written to catalog_order with
+    sequential values so there are no gaps or collisions with uninitialised 999s.
     """
     all_svc = {**get_static_services(), **get_cached_db_products()}
-    all_ids = list(all_svc.keys())
+    all_ids = list(all_svc.keys())   # natural insertion order
 
-    # Build a complete order map, assigning stable defaults for items not yet in table
     order_map = dict(_order_cache)
-    for i, sid in enumerate(all_ids):
-        if sid not in order_map:
-            order_map[sid] = i * 10 + 10   # 10, 20, 30 …
 
-    all_ids.sort(key=lambda s: order_map.get(s, 999))
+    # ── Ensure every item has an explicit sort_order in the DB ───────────────
+    # Sort by (known-order, natural-position) to preserve current visual order
+    def _init_key(s: str):
+        if s in order_map:
+            return (0, order_map[s])
+        return (1, all_ids.index(s))
 
-    idx = next((i for i, s in enumerate(all_ids) if s == service_id), -1)
+    all_ids_sorted = sorted(all_ids, key=_init_key)
+
+    needs_write = [s for s in all_ids_sorted if s not in order_map]
+    if needs_write:
+        # Re-assign clean sequential values to every item
+        for i, sid in enumerate(all_ids_sorted):
+            new_val = i * 10 + 10
+            await set_service_sort_order(sid, new_val)
+            order_map[sid] = new_val
+        await refresh_order_cache()
+        order_map = dict(_order_cache)
+
+    # ── Sort by the now-complete order_map ───────────────────────────────────
+    all_ids_sorted = sorted(all_ids, key=lambda s: order_map[s])
+
+    idx = next((i for i, s in enumerate(all_ids_sorted) if s == service_id), -1)
     if idx == -1:
         return False
     if direction == "up"   and idx == 0:
         return False
-    if direction == "down" and idx == len(all_ids) - 1:
+    if direction == "down" and idx == len(all_ids_sorted) - 1:
         return False
 
-    nb_idx = idx - 1 if direction == "up" else idx + 1
-    nb_id  = all_ids[nb_idx]
-
+    nb_idx   = idx - 1 if direction == "up" else idx + 1
+    nb_id    = all_ids_sorted[nb_idx]
     my_order = order_map[service_id]
     nb_order = order_map[nb_id]
 
-    # Ensure values differ so the swap is meaningful
-    if my_order == nb_order:
-        my_order, nb_order = idx * 10 + 10, nb_idx * 10 + 10
-
     await set_service_sort_order(service_id, nb_order)
-    await set_service_sort_order(nb_id, my_order)
+    await set_service_sort_order(nb_id,      my_order)
     await refresh_order_cache()
     return True
 

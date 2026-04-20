@@ -40,18 +40,52 @@ async def notify_admins_new_order(bot: Bot, order: dict, user: dict) -> None:
 
 
 async def notify_order_delivered(bot: Bot, user_id: int, order: dict, delivery_info: str) -> None:
-    """Notifica al usuario que su pedido fue entregado."""
-    service = SERVICES.get(order["service_id"], {})
-    text = (
-        f"🎉 <b>¡Tu pedido fue entregado!</b>\n\n"
-        f"🆔 Pedido #<b>{order['order_id']}</b>\n"
-        f"🛒 Servicio: {service.get('name', order['service_id'])}\n\n"
-        f"📦 <b>Información de acceso:</b>\n"
-        f"<code>{delivery_info}</code>\n\n"
-        "¡Gracias por tu compra! Si tienes problemas, contáctanos. 💙"
+    """Notifica al usuario que su pedido fue entregado (entrega manual desde admin)."""
+    from utils.delivery import _format_credential
+    import database as _db
+
+    all_svc = {**_db.get_static_services(), **_db.get_cached_db_products(),
+               **_db.get_static_methods(), **_db.get_cached_db_methods()}
+    svc     = all_svc.get(order["service_id"], {})
+    emoji   = svc.get("emoji", "📦")
+    name    = svc.get("name",  order["service_id"])
+    lang    = await _db.get_user_lang(user_id)
+
+    # Format each line of the delivery_info the same way auto-delivery does
+    lines     = [l.strip() for l in delivery_info.splitlines() if l.strip()]
+    fake_items = [{"content": l} for l in lines]
+    creds_block = "\n".join(
+        (f"{i+1}. " if len(fake_items) > 1 else "") + _format_credential(it["content"])
+        for i, it in enumerate(fake_items)
     )
+
+    if lang == "en":
+        text = (
+            f"✅ <b>Order delivered!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{emoji} <b>{name}</b>\n"
+            f"🆔 Order <b>#{order['order_id']}</b>\n\n"
+            f"🔑 <b>Your access:</b>\n"
+            f"{creds_block}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <i>Tap the credentials to copy them instantly.</i>\n"
+            f"📩 Questions? Contact support — we're here for you! 💙"
+        )
+    else:
+        text = (
+            f"✅ <b>¡Pedido entregado!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{emoji} <b>{name}</b>\n"
+            f"🆔 Pedido <b>#{order['order_id']}</b>\n\n"
+            f"🔑 <b>Tu acceso:</b>\n"
+            f"{creds_block}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <i>Toca las credenciales para copiarlas al instante.</i>\n"
+            f"📩 ¿Dudas? Contáctanos — ¡estamos para ayudarte! 💙"
+        )
     try:
-        await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+        await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML",
+                               disable_web_page_preview=True)
     except Exception as e:
         print(f"[WARN] No se pudo notificar al usuario {user_id}: {e}")
 

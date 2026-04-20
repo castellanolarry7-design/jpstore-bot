@@ -7,6 +7,58 @@ import database as db
 from config import ADMIN_IDS, SERVICES, METHODS
 
 
+def _format_credential(content: str) -> str:
+    """
+    Format a single stock item for the delivery message.
+    • URLs  → displayed as a clickable hyperlink (no <code> needed, can't be copied)
+    • Anything else → <code>…</code>  (tap once to copy in Telegram)
+    """
+    c = content.strip()
+    if c.startswith("http://") or c.startswith("https://"):
+        return f'🔗 <a href="{c}">{c}</a>'
+    return f"<code>{c}</code>"
+
+
+def build_delivery_message(
+    emoji: str, name: str, order_id, lang: str, items: list[dict]
+) -> str:
+    """Build a polished delivery message for any number of stock items."""
+    qty_label = f" ×{len(items)}" if len(items) > 1 else ""
+
+    # Format each credential line
+    lines = []
+    for i, it in enumerate(items):
+        cred = _format_credential(it["content"])
+        prefix = f"{i+1}. " if len(items) > 1 else ""
+        lines.append(f"{prefix}{cred}")
+    creds_block = "\n".join(lines)
+
+    if lang == "en":
+        return (
+            f"✅ <b>Order delivered!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{emoji} <b>{name}{qty_label}</b>\n"
+            f"🆔 Order <b>#{order_id}</b>\n\n"
+            f"🔑 <b>Your access:</b>\n"
+            f"{creds_block}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <i>Tap the credentials to copy them instantly.</i>\n"
+            f"📩 Questions? Contact support — we're here for you! 💙"
+        )
+    else:
+        return (
+            f"✅ <b>¡Pedido entregado!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{emoji} <b>{name}{qty_label}</b>\n"
+            f"🆔 Pedido <b>#{order_id}</b>\n\n"
+            f"🔑 <b>Tu acceso:</b>\n"
+            f"{creds_block}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💡 <i>Toca las credenciales para copiarlas al instante.</i>\n"
+            f"📩 ¿Dudas? Contáctanos — ¡estamos para ayudarte! 💙"
+        )
+
+
 def calculate_discount(qty: int) -> float:
     """Returns discount rate: 0.10 for qty>5, 0.15 for qty>15."""
     if qty > 15:
@@ -46,9 +98,7 @@ async def auto_deliver(
 
     if items:
         # ── Delivered automatically ───────────────────────────────────────────
-        combined = "\n".join(f"{i+1}. <code>{it['content']}</code>"
-                             for i, it in enumerate(items))
-        ids_str  = ", ".join(f"#{it['id']}" for it in items)
+        ids_str = ", ".join(f"#{it['id']}" for it in items)
 
         await db.update_order_status(
             order_id, "delivered",
@@ -56,29 +106,10 @@ async def auto_deliver(
             admin_note=f"Auto-delivered {len(items)}x from stock (items {ids_str})"
         )
 
-        qty_label = f" x{len(items)}" if len(items) > 1 else ""
-        if lang == "en":
-            msg = (
-                f"🎉 <b>Your order is ready!</b>\n\n"
-                f"{emoji} <b>{name}{qty_label}</b>\n"
-                f"🆔 Order #{order_id}\n\n"
-                f"📋 <b>Access credentials:</b>\n"
-                f"{combined}\n\n"
-                "Keep these credentials safe. "
-                "Contact support if you have any issues."
-            )
-        else:
-            msg = (
-                f"🎉 <b>¡Tu pedido está listo!</b>\n\n"
-                f"{emoji} <b>{name}{qty_label}</b>\n"
-                f"🆔 Pedido #{order_id}\n\n"
-                f"📋 <b>Credenciales de acceso:</b>\n"
-                f"{combined}\n\n"
-                "Guarda estas credenciales en un lugar seguro. "
-                "Contáctanos si tienes algún problema."
-            )
+        msg = build_delivery_message(emoji, name, order_id, lang, items)
         try:
-            await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML")
+            await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML",
+                                   disable_web_page_preview=True)
         except Exception as e:
             print(f"[Delivery] Error sending credentials to user {user_id}: {e}")
 

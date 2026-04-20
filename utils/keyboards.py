@@ -78,11 +78,15 @@ def catalog_kb(lang: str = "en", stock_levels: dict = None,
     """
     stock_levels = stock_levels or {}
 
-    # Sort services by custom order (unknowns go to end)
-    order_map    = db.get_catalog_order()
+    # Sort services by custom order.
+    # Items not yet in catalog_order get a large stable key (90000 + natural index)
+    # so they appear after explicitly-ordered items without colliding with them.
+    order_map        = db.get_catalog_order()
+    all_svc_dict     = {**db.get_static_services(), **db.get_cached_db_products()}
+    natural_keys     = list(all_svc_dict.keys())
     all_services = sorted(
-        {**db.get_static_services(), **db.get_cached_db_products()}.values(),
-        key=lambda s: order_map.get(s["id"], 999)
+        all_svc_dict.values(),
+        key=lambda s: order_map.get(s["id"], 90000 + natural_keys.index(s["id"]))
     )
     total      = len(all_services)
     start      = page * CATALOG_PAGE_SIZE

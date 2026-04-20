@@ -100,6 +100,7 @@ def _admin_main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📦 Gestión de Stock",    callback_data="admin_stock")],
         [InlineKeyboardButton("🛍️ Productos",           callback_data="admin_products"),
          InlineKeyboardButton("📘 Métodos",             callback_data="admin_methods")],
+        [InlineKeyboardButton("🎭 Simular entrega",     callback_data="admin_sim_pick")],
         [InlineKeyboardButton("🧹 Limpiar pedidos viejos", callback_data="admin_cleanup")],
     ])
 
@@ -2149,6 +2150,101 @@ def admin_main_kb() -> InlineKeyboardMarkup:
 
 def admin_order_kb(order_id: int, user_id: int) -> InlineKeyboardMarkup:
     return _admin_order_kb(order_id, user_id)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIMULAR ENTREGA — preview del mensaje sin afectar stock ni estadísticas
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Sample credentials used in the preview (one per "type" so it looks realistic)
+_SAMPLE_CREDS = {
+    "link": "https://redeem.example.com/abc123xyz",
+    "default": "usuario@ejemplo.com:Contrasena123!",
+}
+
+
+async def admin_sim_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callback: admin_sim_pick
+    Shows a picker of all services + methods so the admin can select
+    which delivery message to preview.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    all_s = {**db.get_static_services(), **db.get_cached_db_products(),
+             **db.get_static_methods(), **db.get_cached_db_methods()}
+
+    btns = []
+    for sid, svc in all_s.items():
+        btns.append([InlineKeyboardButton(
+            f"{svc['emoji']} {svc['name'][:35]}",
+            callback_data=f"admin_sim_{sid}"
+        )])
+    btns.append([InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")])
+
+    await query.edit_message_text(
+        "🎭 <b>Simular entrega</b>\n\n"
+        "Selecciona el producto o método para ver\n"
+        "el mensaje exacto que recibirá el usuario.\n\n"
+        "<i>No se afecta stock ni estadísticas.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(btns)
+    )
+
+
+async def admin_sim_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callback: admin_sim_<service_id>
+    Sends the delivery message preview directly to the admin's chat.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    service_id = query.data[len("admin_sim_"):]
+    all_s      = {**db.get_static_services(), **db.get_cached_db_products(),
+                  **db.get_static_methods(), **db.get_cached_db_methods()}
+    svc        = all_s.get(service_id)
+    if not svc:
+        await query.answer("Servicio no encontrado.", show_alert=True)
+        return
+
+    from utils.delivery import build_delivery_message, _format_credential
+
+    # Detect if this service typically delivers links (check stock hint or name)
+    name_lower = svc.get("name", "").lower()
+    is_link_type = any(k in name_lower for k in ("18m", "18 mes", "redeem", "link", "url"))
+    sample_content = _SAMPLE_CREDS["link"] if is_link_type else _SAMPLE_CREDS["default"]
+
+    fake_items = [{"content": sample_content}]
+    preview_msg = build_delivery_message(
+        emoji   = svc["emoji"],
+        name    = svc["name"],
+        order_id= "PREVIEW",
+        lang    = "es",
+        items   = fake_items,
+    )
+
+    # Header note only visible to admin
+    header = (
+        "🎭 <b>VISTA PREVIA — así verá el usuario su entrega</b>\n"
+        "<i>(Credencial de muestra — no es real)</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    await query.message.reply_text(
+        header + preview_msg,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Probar otro producto", callback_data="admin_sim_pick")],
+            [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+        ])
+    )
 
 
 # ── Legacy /addstock and /stock commands ─────────────────────────────────────
