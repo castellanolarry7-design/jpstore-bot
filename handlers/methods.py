@@ -16,8 +16,8 @@ def _method_price_str(method: dict, lang: str) -> str:
 
 
 def _all_methods() -> dict:
-    """Merge static config METHODS with DB-created methods."""
-    return {**METHODS, **db.get_cached_db_methods()}
+    """Merge static METHODS (with any overrides) + DB-created methods."""
+    return {**db.get_static_methods(), **db.get_cached_db_methods()}
 
 
 def methods_catalog_kb(lang: str) -> InlineKeyboardMarkup:

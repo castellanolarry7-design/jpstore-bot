@@ -14,8 +14,8 @@ from utils.delivery import apply_discount
 
 
 def _all_catalog_services() -> dict:
-    """Merge static SERVICES with dynamically-created DB products."""
-    return {**SERVICES, **db.get_cached_db_products()}
+    """Merge static SERVICES (with any price/description overrides) + DB products."""
+    return {**db.get_static_services(), **db.get_cached_db_products()}
 
 
 async def _show_text(query, text: str, reply_markup, parse_mode: str = "HTML") -> None:
@@ -41,7 +41,21 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _show_text(
         query,
         t("catalog_title", lang),
-        reply_markup=catalog_kb(lang, stock_levels)
+        reply_markup=catalog_kb(lang, stock_levels, page=0)
+    )
+
+
+async def show_catalog_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: catalog_page_<n> — navigate to a different catalog page."""
+    query = update.callback_query
+    await query.answer()
+    page         = int(query.data.split("_")[-1])
+    lang         = await db.get_user_lang(query.from_user.id)
+    stock_levels = await db.get_stock_levels_dict()
+    await _show_text(
+        query,
+        t("catalog_title", lang),
+        reply_markup=catalog_kb(lang, stock_levels, page=page)
     )
 
 

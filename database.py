@@ -106,6 +106,19 @@ async def _create_tables_pg(conn) -> None:
         )
     """)
     await conn.execute("""
+        CREATE TABLE IF NOT EXISTS product_overrides (
+            service_id   TEXT PRIMARY KEY,
+            price        REAL    DEFAULT NULL,
+            name         TEXT    DEFAULT NULL,
+            emoji        TEXT    DEFAULT NULL,
+            desc_en      TEXT    DEFAULT NULL,
+            desc_es      TEXT    DEFAULT NULL,
+            delivery_en  TEXT    DEFAULT NULL,
+            delivery_es  TEXT    DEFAULT NULL,
+            updated_at   TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id         BIGINT PRIMARY KEY,
             username        TEXT,
@@ -233,6 +246,19 @@ async def _create_tables_sqlite(db) -> None:
         )
     """)
     await db.execute("""
+        CREATE TABLE IF NOT EXISTS product_overrides (
+            service_id   TEXT PRIMARY KEY,
+            price        REAL    DEFAULT NULL,
+            name         TEXT    DEFAULT NULL,
+            emoji        TEXT    DEFAULT NULL,
+            desc_en      TEXT    DEFAULT NULL,
+            desc_es      TEXT    DEFAULT NULL,
+            delivery_en  TEXT    DEFAULT NULL,
+            delivery_es  TEXT    DEFAULT NULL,
+            updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id         INTEGER PRIMARY KEY,
             username        TEXT,
@@ -355,6 +381,7 @@ async def init_db() -> None:
     # Warm up the in-memory caches
     await refresh_products_cache()
     await refresh_methods_cache()
+    await refresh_overrides_cache()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -393,6 +420,128 @@ def get_cached_db_products() -> dict:
     return dict(_products_cache)
 
 
+# ─── Product overrides (price/description overrides for static config.py products) ──
+
+_overrides_cache: dict = {}   # service_id → {price, name, emoji, desc_en, ...}
+
+
+async def refresh_overrides_cache() -> None:
+    global _overrides_cache
+    rows = await _fetch("SELECT * FROM product_overrides")
+    _overrides_cache = {r["service_id"]: dict(r) for r in rows}
+
+
+def get_static_services() -> dict:
+    """Return SERVICES (config.py) with any stored overrides applied."""
+    from config import SERVICES
+    result = {}
+    for sid, svc in SERVICES.items():
+        ovr = _overrides_cache.get(sid)
+        if not ovr:
+            result[sid] = svc
+            continue
+        entry = dict(svc)
+        if ovr.get("price") is not None:
+            entry["price"] = float(ovr["price"])
+        if ovr.get("name"):
+            entry["name"] = ovr["name"]
+        if ovr.get("emoji"):
+            entry["emoji"] = ovr["emoji"]
+        if ovr.get("desc_en") or ovr.get("desc_es"):
+            entry["description"] = dict(entry.get("description", {}))
+            if ovr.get("desc_en"):
+                entry["description"]["en"] = ovr["desc_en"]
+            if ovr.get("desc_es"):
+                entry["description"]["es"] = ovr["desc_es"]
+        if ovr.get("delivery_en") or ovr.get("delivery_es"):
+            entry["delivery"] = dict(entry.get("delivery", {}))
+            if ovr.get("delivery_en"):
+                entry["delivery"]["en"] = ovr["delivery_en"]
+            if ovr.get("delivery_es"):
+                entry["delivery"]["es"] = ovr["delivery_es"]
+        result[sid] = entry
+    return result
+
+
+def get_static_methods() -> dict:
+    """Return METHODS (config.py) with any stored overrides applied."""
+    from config import METHODS
+    result = {}
+    for mid, m in METHODS.items():
+        ovr = _overrides_cache.get(mid)
+        if not ovr:
+            result[mid] = m
+            continue
+        entry = dict(m)
+        if ovr.get("price") is not None:
+            entry["price"] = float(ovr["price"])
+        if ovr.get("name"):
+            entry["name"] = ovr["name"]
+        if ovr.get("emoji"):
+            entry["emoji"] = ovr["emoji"]
+        if ovr.get("desc_en") or ovr.get("desc_es"):
+            entry["description"] = dict(entry.get("description", {}))
+            if ovr.get("desc_en"):
+                entry["description"]["en"] = ovr["desc_en"]
+            if ovr.get("desc_es"):
+                entry["description"]["es"] = ovr["desc_es"]
+        if ovr.get("delivery_en") or ovr.get("delivery_es"):
+            entry["delivery"] = dict(entry.get("delivery", {}))
+            if ovr.get("delivery_en"):
+                entry["delivery"]["en"] = ovr["delivery_en"]
+            if ovr.get("delivery_es"):
+                entry["delivery"]["es"] = ovr["delivery_es"]
+        result[mid] = entry
+    return result
+
+
+async def set_product_override(service_id: str, field: str, value) -> None:
+    """Store a field override for a static product/method. Refreshes cache."""
+    allowed = {"price", "name", "emoji", "desc_en", "desc_es", "delivery_en", "delivery_es"}
+    if field not in allowed:
+        return
+    if _USE_PG:
+        await _exec(f"""
+            INSERT INTO product_overrides (service_id, {field})
+            VALUES ($1, $2)
+            ON CONFLICT (service_id) DO UPDATE SET {field}=$2, updated_at=NOW()
+        """, service_id, value)
+    else:
+        # SQLite: upsert then update the specific column
+        await _exec("""
+            INSERT OR IGNORE INTO product_overrides (service_id) VALUES ($1)
+        """, service_id)
+        await _exec(f"UPDATE product_overrides SET {field}=$1 WHERE service_id=$2", value, service_id)
+    await refresh_overrides_cache()
+
+
+async def get_product_override(service_id: str) -> dict:
+    """Return the override dict for a service_id, or {}."""
+    return dict(_overrides_cache.get(service_id, {}))
+
+
+async def update_db_product_field(db_id: int, field: str, value) -> bool:
+    """Update a single editable field of a DB product. Returns True on success."""
+    allowed = {
+        "price": float,
+        "name": str,
+        "emoji": str,
+        "description_en": str,
+        "description_es": str,
+        "delivery_en": str,
+        "delivery_es": str,
+    }
+    if field not in allowed:
+        return False
+    try:
+        value = allowed[field](value)
+    except (ValueError, TypeError):
+        return False
+    await _exec(f"UPDATE products SET {field}=$1 WHERE id=$2", value, db_id)
+    await refresh_products_cache()
+    return True
+
+
 async def create_db_product(
     name: str, emoji: str, price: float,
     desc_en: str, desc_es: str,
@@ -402,10 +551,11 @@ async def create_db_product(
     """Create a new dynamic product and refresh the cache. Returns the new DB row id."""
     import re
     base_sid = re.sub(r"[^a-z0-9]+", "_", name.lower().strip()).strip("_")[:25] or "product"
-    service_id = base_sid
-    # Avoid collision with existing service_ids (static OR DB)
+    # Build a comprehensive set of taken IDs: static config + in-memory cache + live DB query
     from config import SERVICES, METHODS
-    taken = set(SERVICES) | set(METHODS) | set(_products_cache)
+    db_rows = await _fetch("SELECT service_id FROM products")
+    taken = set(SERVICES) | set(METHODS) | set(_products_cache) | {r["service_id"] for r in db_rows}
+    service_id = base_sid
     suffix = 2
     while service_id in taken:
         service_id = f"{base_sid}_{suffix}"[:30]

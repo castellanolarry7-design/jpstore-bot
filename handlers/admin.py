@@ -38,6 +38,10 @@ WAITING_SET_PHOTO = 48
 # Welcome photo state (for /setphoto command)
 WAITING_WELCOME_PHOTO = 49
 
+# Product / static-product edit states
+WAITING_PROD_EDIT_VALUE   = 60   # new value for a DB product field
+WAITING_STATIC_EDIT_VALUE = 61   # new value for a static product/method override
+
 # Method management states
 WAITING_METHOD_NAME        = 50
 WAITING_METHOD_EMOJI       = 51
@@ -63,13 +67,14 @@ def is_authed(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
 
 def _all_services() -> dict:
-    """Static + DB-cached products + methods."""
-    return {**SERVICES, **db.get_cached_db_products(), **METHODS}
+    """Static + DB-cached products (with overrides) + methods."""
+    return {**db.get_static_services(), **db.get_cached_db_products(),
+            **db.get_static_methods(), **db.get_cached_db_methods()}
 
 
 def _catalog_services() -> dict:
-    """Services available in the catalog (SERVICES + DB products, not METHODS)."""
-    return {**SERVICES, **db.get_cached_db_products()}
+    """Services available in the catalog (SERVICES + DB products, with overrides)."""
+    return {**db.get_static_services(), **db.get_cached_db_products()}
 
 
 def _svc_name(service_id: str) -> str:
@@ -789,28 +794,20 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         photo_icon = "🖼️" if has_photo else "📷"
         prod_buttons.append([
             InlineKeyboardButton(
-                f"🗑️ Eliminar {p['emoji']} {p['name'][:18]}",
-                callback_data=f"admin_prod_del_{p['id']}"
-            ),
-            InlineKeyboardButton(
-                f"{photo_icon} Foto",
-                callback_data=f"admin_prod_photo_{p['service_id']}"
+                f"✏️ {p['emoji']} {p['name'][:20]}",
+                callback_data=f"admin_prod_edit_{p['id']}"
             ),
         ])
-
-    # Photo management for static services
-    from config import SERVICES as _STATIC
-    static_btns = []
-    for sid, svc in _STATIC.items():
-        static_btns.append([InlineKeyboardButton(
-            f"📷 Foto: {svc['emoji']} {svc['name'][:22]}",
-            callback_data=f"admin_prod_photo_{sid}"
-        )])
+        prod_buttons.append([
+            InlineKeyboardButton(f"{photo_icon} Foto", callback_data=f"admin_prod_photo_{p['service_id']}"),
+            InlineKeyboardButton("🗑️ Eliminar",        callback_data=f"admin_prod_del_{p['id']}"),
+        ])
 
     kb = InlineKeyboardMarkup(prod_buttons + [
-        [InlineKeyboardButton("📷 Poner foto a productos estáticos", callback_data="admin_static_photos")],
-        [InlineKeyboardButton("➕ Crear nuevo producto", callback_data="admin_prod_add")],
-        [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
+        [InlineKeyboardButton("⚙️ Editar productos estáticos", callback_data="admin_static_edit_list")],
+        [InlineKeyboardButton("📷 Fotos productos estáticos",  callback_data="admin_static_photos")],
+        [InlineKeyboardButton("➕ Crear nuevo producto",        callback_data="admin_prod_add")],
+        [InlineKeyboardButton("◀️ Panel admin",                callback_data="admin_panel")],
     ])
 
     await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
@@ -1291,6 +1288,419 @@ async def admin_product_del(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
     else:
         await query.answer("❌ Producto no encontrado.", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EDITAR PRODUCTOS — DB products y estáticos (config.py overrides)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_EDIT_FIELD_LABELS = {
+    "price":          ("💵", "Precio (USDT)"),
+    "name":           ("📛", "Nombre"),
+    "emoji":          ("🎨", "Emoji"),
+    "description_en": ("📝", "Descripción EN"),
+    "description_es": ("📝", "Descripción ES"),
+    "delivery_en":    ("⏱️", "Entrega EN"),
+    "delivery_es":    ("⏱️", "Entrega ES"),
+    # static override fields use shorter names
+    "desc_en":        ("📝", "Descripción EN"),
+    "desc_es":        ("📝", "Descripción ES"),
+}
+
+
+# ── DB product edit ───────────────────────────────────────────────────────────
+
+async def admin_prod_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callback: admin_prod_edit_<db_id>
+    Shows current product values and field-selection buttons.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    db_id  = int(query.data.replace("admin_prod_edit_", "", 1))
+    cached = db.get_cached_db_products()
+    prod   = next((v for v in cached.values() if v.get("_db_id") == db_id), None)
+    if not prod:
+        await query.answer("❌ Producto no encontrado.", show_alert=True)
+        return
+
+    desc_en  = prod.get("description", {}).get("en", "—")
+    desc_es  = prod.get("description", {}).get("es", "—")
+    deliv_en = prod.get("delivery",    {}).get("en", "—")
+    deliv_es = prod.get("delivery",    {}).get("es", "—")
+
+    text = (
+        f"✏️ <b>Editar producto:</b> {prod['emoji']} {prod['name']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Precio: <b>${prod['price']:.2f} USDT</b>\n"
+        f"📛 Nombre: {prod['name']}\n"
+        f"🎨 Emoji: {prod['emoji']}\n"
+        f"📝 Desc EN: {desc_en[:60]}{'…' if len(desc_en) > 60 else ''}\n"
+        f"📝 Desc ES: {desc_es[:60]}{'…' if len(desc_es) > 60 else ''}\n"
+        f"⏱️ Entrega EN: {deliv_en}\n"
+        f"⏱️ Entrega ES: {deliv_es}\n\n"
+        "¿Qué campo deseas editar?"
+    )
+
+    btns = [
+        [InlineKeyboardButton("💵 Precio",     callback_data=f"admin_pef_{db_id}_price"),
+         InlineKeyboardButton("📛 Nombre",     callback_data=f"admin_pef_{db_id}_name")],
+        [InlineKeyboardButton("🎨 Emoji",      callback_data=f"admin_pef_{db_id}_emoji")],
+        [InlineKeyboardButton("📝 Desc EN",    callback_data=f"admin_pef_{db_id}_description_en"),
+         InlineKeyboardButton("📝 Desc ES",    callback_data=f"admin_pef_{db_id}_description_es")],
+        [InlineKeyboardButton("⏱️ Entrega EN", callback_data=f"admin_pef_{db_id}_delivery_en"),
+         InlineKeyboardButton("⏱️ Entrega ES", callback_data=f"admin_pef_{db_id}_delivery_es")],
+        [InlineKeyboardButton("◀️ Gestionar Productos", callback_data="admin_products")],
+    ]
+    await query.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(btns))
+
+
+async def admin_prod_edit_field_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Callback: admin_pef_<db_id>_<field>
+    Stores edit context and asks for the new value.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    # admin_pef_<db_id>_<field>  — split on first _ after prefix
+    data       = query.data[len("admin_pef_"):]  # e.g. "7_description_en"
+    db_id_str, field = data.split("_", 1)
+    db_id      = int(db_id_str)
+
+    cached = db.get_cached_db_products()
+    prod   = next((v for v in cached.values() if v.get("_db_id") == db_id), {})
+    label  = f"{prod.get('emoji','📦')} {prod.get('name', '#'+str(db_id))}"
+
+    if field == "price":
+        current = f"${prod.get('price', 0):.2f} USDT"
+    elif field == "name":
+        current = prod.get("name", "—")
+    elif field == "emoji":
+        current = prod.get("emoji", "—")
+    elif field in ("description_en", "description_es"):
+        lang    = "en" if field.endswith("_en") else "es"
+        current = prod.get("description", {}).get(lang, "—")
+    elif field in ("delivery_en", "delivery_es"):
+        lang    = "en" if field.endswith("_en") else "es"
+        current = prod.get("delivery", {}).get(lang, "—")
+    else:
+        current = "—"
+
+    context.user_data["prod_edit"] = {"db_id": db_id, "field": field}
+
+    icon, flabel = _EDIT_FIELD_LABELS.get(field, ("✏️", field))
+    await query.edit_message_text(
+        f"✏️ <b>Editar {flabel}</b>\n"
+        f"Producto: {label}\n\n"
+        f"Valor actual:\n<code>{current}</code>\n\n"
+        "Escribe el <b>nuevo valor</b> y envíalo:\n"
+        "/cancelar para abortar.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancelar", callback_data=f"admin_prod_edit_{db_id}")
+        ]])
+    )
+    return WAITING_PROD_EDIT_VALUE
+
+
+async def admin_prod_edit_receive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """MessageHandler for WAITING_PROD_EDIT_VALUE — receives and saves new value."""
+    if not is_admin(update.effective_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    edit = context.user_data.pop("prod_edit", None)
+    if not edit:
+        await update.message.reply_text("❌ Sesión expirada. Vuelve al panel.")
+        return ConversationHandler.END
+
+    db_id = edit["db_id"]
+    field = edit["field"]
+    raw   = update.message.text.strip()
+
+    if field == "price":
+        try:
+            value = float(raw.replace(",", "."))
+            if value <= 0 or value > 9999:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ Precio inválido. Ej: 9.99")
+            context.user_data["prod_edit"] = edit
+            return WAITING_PROD_EDIT_VALUE
+    else:
+        value = raw
+
+    success = await db.update_db_product_field(db_id, field, value)
+
+    icon, flabel = _EDIT_FIELD_LABELS.get(field, ("✏️", field))
+    display = f"${float(value):.2f} USDT" if field == "price" else value
+
+    if success:
+        await update.message.reply_text(
+            f"✅ <b>{icon} {flabel}</b> actualizado.\n\n"
+            f"Nuevo valor: <code>{display}</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Seguir editando",
+                                      callback_data=f"admin_prod_edit_{db_id}")],
+                [InlineKeyboardButton("🛍️ Gestionar Productos",
+                                      callback_data="admin_products")],
+            ])
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ No se pudo actualizar el campo <b>{field}</b>.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🛍️ Gestionar Productos",
+                                     callback_data="admin_products")
+            ]])
+        )
+    return ConversationHandler.END
+
+
+# ── Static products/methods override edit ─────────────────────────────────────
+
+async def admin_static_edit_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callback: admin_static_edit_list
+    Shows all static SERVICES + METHODS with buttons to open their edit menu.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    static_svcs  = db.get_static_services()
+    static_meths = db.get_static_methods()
+
+    btns = []
+    if static_svcs:
+        btns.append([InlineKeyboardButton("── Servicios ──", callback_data="noop")])
+        for sid, svc in static_svcs.items():
+            btns.append([InlineKeyboardButton(
+                f"⚙️ {svc['emoji']} {svc['name'][:30]}",
+                callback_data=f"admin_sedit_{sid}"
+            )])
+    if static_meths:
+        btns.append([InlineKeyboardButton("── Métodos ──", callback_data="noop")])
+        for mid, m in static_meths.items():
+            btns.append([InlineKeyboardButton(
+                f"⚙️ {m['emoji']} {m['name'][:30]}",
+                callback_data=f"admin_sedit_{mid}"
+            )])
+    btns.append([InlineKeyboardButton("◀️ Gestionar Productos",
+                                       callback_data="admin_products")])
+
+    await query.edit_message_text(
+        "⚙️ <b>Editar productos/métodos estáticos</b>\n\n"
+        "Los cambios se guardan como <i>overrides</i> en la base de datos\n"
+        "y se aplican sin modificar el código fuente.\n\n"
+        "Selecciona un producto o método:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(btns)
+    )
+
+
+async def admin_static_edit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callback: admin_sedit_<service_id>
+    Shows current values (config + any overrides) and field-selection buttons.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    service_id = query.data[len("admin_sedit_"):]
+    all_s      = {**db.get_static_services(), **db.get_static_methods()}
+    svc        = all_s.get(service_id)
+    if not svc:
+        await query.answer("❌ Producto no encontrado.", show_alert=True)
+        return
+
+    override = await db.get_product_override(service_id) or {}
+
+    def ov(ov_key: str, display: str) -> str:
+        if override.get(ov_key) is not None:
+            return f"{display} <i>✎</i>"
+        return display
+
+    desc_en  = svc.get("description", {}).get("en", "—")
+    desc_es  = svc.get("description", {}).get("es", "—")
+    deliv_en = svc.get("delivery",    {}).get("en", "—")
+    deliv_es = svc.get("delivery",    {}).get("es", "—")
+
+    price_str = f"${svc['price']:.2f} USDT"
+    text = (
+        f"⚙️ <b>Editar estático:</b> {svc['emoji']} {svc['name']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Precio: <b>{ov('price', price_str)}</b>\n"
+        f"📛 Nombre: {ov('name', svc['name'])}\n"
+        f"🎨 Emoji: {ov('emoji', svc['emoji'])}\n"
+        f"📝 Desc EN: {ov('desc_en', desc_en[:60] + ('…' if len(desc_en) > 60 else ''))}\n"
+        f"📝 Desc ES: {ov('desc_es', desc_es[:60] + ('…' if len(desc_es) > 60 else ''))}\n"
+        f"⏱️ Entrega EN: {ov('delivery_en', deliv_en)}\n"
+        f"⏱️ Entrega ES: {ov('delivery_es', deliv_es)}\n\n"
+        "<i>✎ = valor sobreescrito (override activo)</i>\n\n"
+        "¿Qué campo deseas editar?"
+    )
+
+    btns = [
+        [InlineKeyboardButton("💵 Precio",     callback_data=f"admin_sef_{service_id}_price"),
+         InlineKeyboardButton("📛 Nombre",     callback_data=f"admin_sef_{service_id}_name")],
+        [InlineKeyboardButton("🎨 Emoji",      callback_data=f"admin_sef_{service_id}_emoji")],
+        [InlineKeyboardButton("📝 Desc EN",    callback_data=f"admin_sef_{service_id}_desc_en"),
+         InlineKeyboardButton("📝 Desc ES",    callback_data=f"admin_sef_{service_id}_desc_es")],
+        [InlineKeyboardButton("⏱️ Entrega EN", callback_data=f"admin_sef_{service_id}_delivery_en"),
+         InlineKeyboardButton("⏱️ Entrega ES", callback_data=f"admin_sef_{service_id}_delivery_es")],
+        [InlineKeyboardButton("◀️ Lista",      callback_data="admin_static_edit_list")],
+    ]
+    await query.edit_message_text(text, parse_mode="HTML",
+                                  reply_markup=InlineKeyboardMarkup(btns))
+
+
+async def admin_static_edit_start(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """
+    Callback: admin_sef_<service_id>_<field>
+    Entry point of static_edit_conv — asks for the new value.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    # Parse service_id and field from callback data.
+    # Fields: price, name, emoji, desc_en, desc_es, delivery_en, delivery_es
+    data = query.data[len("admin_sef_"):]
+    known_fields = ["delivery_en", "delivery_es", "desc_en", "desc_es",
+                    "price", "name", "emoji"]
+    field      = None
+    service_id = None
+    for f in known_fields:
+        suffix = "_" + f
+        if data.endswith(suffix):
+            field      = f
+            service_id = data[: -len(suffix)]
+            break
+
+    if not field or not service_id:
+        await query.answer("❌ Campo no reconocido.", show_alert=True)
+        return ConversationHandler.END
+
+    all_s = {**db.get_static_services(), **db.get_static_methods()}
+    svc   = all_s.get(service_id, {})
+    label = f"{svc.get('emoji','⚙️')} {svc.get('name', service_id)}"
+
+    if field == "price":
+        current = f"${svc.get('price', 0):.2f} USDT"
+    elif field == "name":
+        current = svc.get("name", "—")
+    elif field == "emoji":
+        current = svc.get("emoji", "—")
+    elif field in ("desc_en", "desc_es"):
+        lang    = "en" if field.endswith("_en") else "es"
+        current = svc.get("description", {}).get(lang, "—")
+    elif field in ("delivery_en", "delivery_es"):
+        lang    = "en" if field.endswith("_en") else "es"
+        current = svc.get("delivery", {}).get(lang, "—")
+    else:
+        current = "—"
+
+    context.user_data["static_edit"] = {"service_id": service_id, "field": field}
+
+    icon, flabel = {
+        "price":       ("💵", "Precio (USDT)"),
+        "name":        ("📛", "Nombre"),
+        "emoji":       ("🎨", "Emoji"),
+        "desc_en":     ("📝", "Descripción EN"),
+        "desc_es":     ("📝", "Descripción ES"),
+        "delivery_en": ("⏱️", "Entrega EN"),
+        "delivery_es": ("⏱️", "Entrega ES"),
+    }.get(field, ("✏️", field))
+
+    await query.edit_message_text(
+        f"✏️ <b>Editar {flabel}</b>\n"
+        f"Producto: {label}\n\n"
+        f"Valor actual:\n<code>{current}</code>\n\n"
+        "Escribe el <b>nuevo valor</b> y envíalo:\n"
+        "/cancelar para abortar.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancelar", callback_data=f"admin_sedit_{service_id}")
+        ]])
+    )
+    return WAITING_STATIC_EDIT_VALUE
+
+
+async def admin_static_edit_receive(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """MessageHandler for WAITING_STATIC_EDIT_VALUE — saves the override."""
+    if not is_admin(update.effective_user.id) or not is_authed(context):
+        return ConversationHandler.END
+
+    edit = context.user_data.pop("static_edit", None)
+    if not edit:
+        await update.message.reply_text("❌ Sesión expirada. Vuelve al panel.")
+        return ConversationHandler.END
+
+    service_id = edit["service_id"]
+    field      = edit["field"]
+    raw        = update.message.text.strip()
+
+    if field == "price":
+        try:
+            value = float(raw.replace(",", "."))
+            if value <= 0 or value > 9999:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ Precio inválido. Ej: 9.99")
+            context.user_data["static_edit"] = edit
+            return WAITING_STATIC_EDIT_VALUE
+    else:
+        value = raw
+
+    await db.set_product_override(service_id, field, value)
+
+    icon, flabel = {
+        "price":       ("💵", "Precio"),
+        "name":        ("📛", "Nombre"),
+        "emoji":       ("🎨", "Emoji"),
+        "desc_en":     ("📝", "Descripción EN"),
+        "desc_es":     ("📝", "Descripción ES"),
+        "delivery_en": ("⏱️", "Entrega EN"),
+        "delivery_es": ("⏱️", "Entrega ES"),
+    }.get(field, ("✏️", field))
+
+    display = f"${float(value):.2f} USDT" if field == "price" else value
+    await update.message.reply_text(
+        f"✅ <b>{icon} {flabel}</b> override guardado.\n\n"
+        f"Nuevo valor: <code>{display}</code>\n"
+        f"<i>ID: <code>{service_id}</code></i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️ Seguir editando",
+                                   callback_data=f"admin_sedit_{service_id}")],
+            [InlineKeyboardButton("📋 Lista estáticos",
+                                   callback_data="admin_static_edit_list")],
+            [InlineKeyboardButton("🛍️ Gestionar Productos",
+                                   callback_data="admin_products")],
+        ])
+    )
+    return ConversationHandler.END
 
 
 # ══════════════════════════════════════════════════════════════════════════════

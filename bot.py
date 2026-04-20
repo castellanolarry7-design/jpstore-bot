@@ -19,8 +19,9 @@ from database import init_db
 # Handlers
 from handlers.start    import start, show_language_selector, set_language, support, check_membership_callback
 from utils.membership  import check_membership_detail, build_gate_message
-from handlers.catalog  import (show_catalog, show_service, show_payment_methods,
-                                show_quantity_selector, qty_control, select_quantity)
+from handlers.catalog  import (show_catalog, show_catalog_page, show_service,
+                                show_payment_methods, show_quantity_selector,
+                                qty_control, select_quantity)
 from handlers.methods  import (show_methods, show_method_detail,
                                 show_method_payment, initiate_method_payment,
                                 initiate_balance_method_payment)
@@ -67,6 +68,12 @@ from handlers.admin    import (
     admin_photo_upload_prompt, admin_photo_receive, admin_photo_delete,
     # Welcome photo command
     cmd_setphoto, receive_welcome_photo,
+    # DB product editing
+    admin_prod_edit_menu,
+    admin_prod_edit_field_start, admin_prod_edit_receive,
+    # Static product/method override editing
+    admin_static_edit_list, admin_static_edit_menu,
+    admin_static_edit_start, admin_static_edit_receive,
     # Method management
     admin_methods_menu,
     admin_method_add_start,
@@ -84,6 +91,7 @@ from handlers.admin    import (
     WAITING_PROD_DESC_EN, WAITING_PROD_DESC_ES,
     WAITING_PROD_DELIVERY_EN, WAITING_PROD_DELIVERY_ES,
     WAITING_PROD_PHOTO, WAITING_SET_PHOTO, WAITING_WELCOME_PHOTO,
+    WAITING_PROD_EDIT_VALUE, WAITING_STATIC_EDIT_VALUE,
     WAITING_METHOD_NAME, WAITING_METHOD_EMOJI, WAITING_METHOD_PRICE,
     WAITING_METHOD_DESC_EN, WAITING_METHOD_DESC_ES,
     WAITING_METHOD_DELIVERY_EN, WAITING_METHOD_DELIVERY_ES,
@@ -355,6 +363,62 @@ def build_application() -> Application:
     )
     app.add_handler(set_photo_conv)
 
+    # ── DB product field edit ─────────────────────────────────────────────────
+    # Entry: admin_pef_<db_id>_<field>  (e.g. admin_pef_7_description_en)
+    prod_edit_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_prod_edit_field_start,
+                                 pattern=r"^admin_pef_\d+_.+$"),
+        ],
+        states={
+            WAITING_PROD_EDIT_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_prod_edit_receive),
+                CommandHandler("cancel",   admin_cancel_conv),
+                CommandHandler("cancelar", admin_cancel_conv),
+                CallbackQueryHandler(admin_products, pattern=r"^admin_products$"),
+                CallbackQueryHandler(admin_panel,    pattern=r"^admin_panel$"),
+                # "Cancel" in the edit prompt goes back to the edit menu
+                CallbackQueryHandler(admin_prod_edit_menu, pattern=r"^admin_prod_edit_\d+$"),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_products, pattern=r"^admin_products$"),
+            CallbackQueryHandler(admin_panel,    pattern=r"^admin_panel$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(prod_edit_conv)
+
+    # ── Static product/method override edit ───────────────────────────────────
+    # Entry: admin_sef_<service_id>_<field>  (e.g. admin_sef_gemini_pro_1m_price)
+    static_edit_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_static_edit_start, pattern=r"^admin_sef_.+$"),
+        ],
+        states={
+            WAITING_STATIC_EDIT_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_static_edit_receive),
+                CommandHandler("cancel",   admin_cancel_conv),
+                CommandHandler("cancelar", admin_cancel_conv),
+                CallbackQueryHandler(admin_products,          pattern=r"^admin_products$"),
+                CallbackQueryHandler(admin_panel,             pattern=r"^admin_panel$"),
+                CallbackQueryHandler(admin_static_edit_menu,  pattern=r"^admin_sedit_.+$"),
+                CallbackQueryHandler(admin_static_edit_list,  pattern=r"^admin_static_edit_list$"),
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_cancel_conv),
+            CommandHandler("cancelar", admin_cancel_conv),
+            CallbackQueryHandler(admin_products,         pattern=r"^admin_products$"),
+            CallbackQueryHandler(admin_panel,            pattern=r"^admin_panel$"),
+            CallbackQueryHandler(admin_static_edit_list, pattern=r"^admin_static_edit_list$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(static_edit_conv)
+
     # ── Custom top-up amount ──────────────────────────────────────────────────
     custom_topup_conv = ConversationHandler(
         entry_points=[
@@ -444,6 +508,7 @@ def build_application() -> Application:
 
     # ── Catalog ───────────────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(show_catalog,           pattern=r"^catalog$"))
+    app.add_handler(CallbackQueryHandler(show_catalog_page,      pattern=r"^catalog_page_\d+$"))
     app.add_handler(CallbackQueryHandler(show_service,           pattern=r"^service_.+$"))
     app.add_handler(CallbackQueryHandler(show_quantity_selector, pattern=r"^qtysel_.+$"))
     app.add_handler(CallbackQueryHandler(qty_control,            pattern=r"^qtyctrl_.+_\d+$"))
@@ -501,11 +566,16 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_product_confirm, pattern=r"^admin_prod_confirm$"))
     app.add_handler(CallbackQueryHandler(admin_product_cancel,  pattern=r"^admin_prod_cancel$"))
     app.add_handler(CallbackQueryHandler(admin_product_del,     pattern=r"^admin_prod_del_\d+$"))
+    # DB product edit menu (non-conv — just shows field buttons)
+    app.add_handler(CallbackQueryHandler(admin_prod_edit_menu,  pattern=r"^admin_prod_edit_\d+$"))
     # Photo management
     app.add_handler(CallbackQueryHandler(admin_static_photos,   pattern=r"^admin_static_photos$"))
     # admin_prod_photo_menu is the entry point of set_photo_conv (registered above)
     # admin_photo_delete now embeds service_id: admin_photo_delete_<sid>
     app.add_handler(CallbackQueryHandler(admin_photo_delete,    pattern=r"^admin_photo_delete_.+$"))
+    # Static product/method override edit (non-conv menu screens)
+    app.add_handler(CallbackQueryHandler(admin_static_edit_list, pattern=r"^admin_static_edit_list$"))
+    app.add_handler(CallbackQueryHandler(admin_static_edit_menu, pattern=r"^admin_sedit_.+$"))
 
     # ── Method management ─────────────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(admin_methods_menu,         pattern=r"^admin_methods$"))

@@ -66,13 +66,24 @@ def stock_badge(qty: int, lang: str) -> str:
     return f"🟢 {qty} " + ("in stock" if lang == "en" else "disponibles")
 
 
-def catalog_kb(lang: str = "en", stock_levels: dict = None) -> InlineKeyboardMarkup:
+CATALOG_PAGE_SIZE = 10
+
+
+def catalog_kb(lang: str = "en", stock_levels: dict = None,
+               page: int = 0) -> InlineKeyboardMarkup:
+    """
+    Paginated catalog keyboard.
+    page=0 is the first page.  Shows CATALOG_PAGE_SIZE items per page.
+    """
     stock_levels = stock_levels or {}
-    # Merge static SERVICES with dynamically-created DB products
-    all_services = {**SERVICES, **db.get_cached_db_products()}
+    all_services = list({**db.get_static_services(), **db.get_cached_db_products()}.values())
+    total        = len(all_services)
+    start        = page * CATALOG_PAGE_SIZE
+    page_items   = all_services[start: start + CATALOG_PAGE_SIZE]
+
     buttons = []
-    for svc in all_services.values():
-        qty = stock_levels.get(svc["id"], 0)
+    for svc in page_items:
+        qty   = stock_levels.get(svc["id"], 0)
         badge = f" | {stock_badge(qty, lang)}" if stock_levels else ""
         buttons.append([
             InlineKeyboardButton(
@@ -80,6 +91,30 @@ def catalog_kb(lang: str = "en", stock_levels: dict = None) -> InlineKeyboardMar
                 callback_data=f"service_{svc['id']}"
             )
         ])
+
+    # Pagination row
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            "◀️ " + ("Anterior" if lang == "es" else "Previous"),
+            callback_data=f"catalog_page_{page - 1}"
+        ))
+    if start + CATALOG_PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton(
+            ("Siguiente" if lang == "es" else "Next") + " ▶️",
+            callback_data=f"catalog_page_{page + 1}"
+        ))
+    if nav:
+        buttons.append(nav)
+
+    # Page counter when there is more than one page
+    if total > CATALOG_PAGE_SIZE:
+        total_pages = (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE
+        buttons.append([InlineKeyboardButton(
+            f"📄 {page + 1}/{total_pages}",
+            callback_data="noop"
+        )])
+
     buttons.append([InlineKeyboardButton(t("btn_home", lang), callback_data="home")])
     return InlineKeyboardMarkup(buttons)
 
