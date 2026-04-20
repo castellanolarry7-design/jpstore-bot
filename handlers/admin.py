@@ -769,48 +769,94 @@ async def admin_stock_del_item(update: Update, context: ContextTypes.DEFAULT_TYP
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Products management menu."""
+    """
+    Products management menu — shows ALL products (static + DB) in catalog order
+    with ↑/↓ reorder buttons, edit, photo, and delete controls.
+    """
     query = update.callback_query
     await query.answer()
     if not is_admin(query.from_user.id) or not is_authed(context):
         await query.answer("🔐 Sesión expirada. Usa /weboadmin.", show_alert=True)
         return
 
-    db_prods = await db.get_all_db_products()
+    # Build the full sorted catalog list (same order users see)
+    order_map = db.get_catalog_order()
+    all_svcs  = {**db.get_static_services(), **db.get_cached_db_products()}
+    sorted_ids = sorted(all_svcs.keys(), key=lambda s: order_map.get(s, 999))
+    sorted_svcs = [(sid, all_svcs[sid]) for sid in sorted_ids]
+
+    # DB products index for photo / edit / delete controls
+    db_prods    = await db.get_all_db_products()
+    db_by_sid   = {p["service_id"]: p for p in db_prods}
 
     lines = ["🛍️ <b>Gestionar Productos</b>\n━━━━━━━━━━━━━━━━━━━━━━━"]
-    if db_prods:
-        lines.append(f"<i>Productos creados desde el bot ({len(db_prods)}):</i>\n")
-        for p in db_prods:
-            lines.append(f"  {p['emoji']} <b>{p['name']}</b> — ${float(p['price']):.2f} USDT"
-                         f"  <code>[{p['service_id']}]</code>")
-    else:
-        lines.append("\n<i>No hay productos dinámicos creados aún.</i>")
-    lines.append("\n<i>Los productos estáticos del config.py no se muestran aquí.</i>")
+    lines.append(f"<i>Total: {len(sorted_svcs)} producto(s) — en orden del catálogo</i>\n")
+    lines.append("<i>Usa ⬆️ ⬇️ para cambiar el orden que ven los usuarios.</i>")
 
     prod_buttons = []
-    for p in db_prods:
-        has_photo = bool(p.get("photo_file_id"))
-        photo_icon = "🖼️" if has_photo else "📷"
+    total = len(sorted_svcs)
+    for pos, (sid, svc) in enumerate(sorted_svcs):
+        is_db      = sid in db_by_sid
+        tag        = "🔧" if is_db else "⚙️"
+        name_short = f"{svc['emoji']} {svc['name'][:18]}"
+
+        # Row 1: ⬆️ [name+type] ⬇️
+        up_cb   = f"admin_cord_up_{sid}"   if pos > 0           else "noop"
+        down_cb = f"admin_cord_down_{sid}" if pos < total - 1   else "noop"
         prod_buttons.append([
-            InlineKeyboardButton(
-                f"✏️ {p['emoji']} {p['name'][:20]}",
-                callback_data=f"admin_prod_edit_{p['id']}"
-            ),
-        ])
-        prod_buttons.append([
-            InlineKeyboardButton(f"{photo_icon} Foto", callback_data=f"admin_prod_photo_{p['service_id']}"),
-            InlineKeyboardButton("🗑️ Eliminar",        callback_data=f"admin_prod_del_{p['id']}"),
+            InlineKeyboardButton("⬆️",             callback_data=up_cb),
+            InlineKeyboardButton(f"{tag} {name_short}", callback_data="noop"),
+            InlineKeyboardButton("⬇️",             callback_data=down_cb),
         ])
 
+        # Row 2: edit + (photo + delete for DB) / (edit-static for static)
+        if is_db:
+            p = db_by_sid[sid]
+            photo_icon = "🖼️" if p.get("photo_file_id") else "📷"
+            prod_buttons.append([
+                InlineKeyboardButton("✏️ Editar",         callback_data=f"admin_prod_edit_{p['id']}"),
+                InlineKeyboardButton(f"{photo_icon} Foto", callback_data=f"admin_prod_photo_{sid}"),
+                InlineKeyboardButton("🗑️",               callback_data=f"admin_prod_del_{p['id']}"),
+            ])
+        else:
+            prod_buttons.append([
+                InlineKeyboardButton("✏️ Editar",  callback_data=f"admin_sedit_{sid}"),
+                InlineKeyboardButton("📷 Foto",    callback_data=f"admin_prod_photo_{sid}"),
+            ])
+
     kb = InlineKeyboardMarkup(prod_buttons + [
-        [InlineKeyboardButton("⚙️ Editar productos estáticos", callback_data="admin_static_edit_list")],
-        [InlineKeyboardButton("📷 Fotos productos estáticos",  callback_data="admin_static_photos")],
-        [InlineKeyboardButton("➕ Crear nuevo producto",        callback_data="admin_prod_add")],
-        [InlineKeyboardButton("◀️ Panel admin",                callback_data="admin_panel")],
+        [InlineKeyboardButton("➕ Crear nuevo producto", callback_data="admin_prod_add")],
+        [InlineKeyboardButton("◀️ Panel admin",          callback_data="admin_panel")],
     ])
 
     await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+async def admin_prod_order_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Callbacks: admin_cord_up_<service_id>  /  admin_cord_down_<service_id>
+    Moves a product one step up or down in the catalog order.
+    """
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    data = query.data   # e.g. "admin_cord_up_gemini_pro_1m"
+    if data.startswith("admin_cord_up_"):
+        direction  = "up"
+        service_id = data[len("admin_cord_up_"):]
+    else:
+        direction  = "down"
+        service_id = data[len("admin_cord_down_"):]
+
+    moved = await db.move_catalog_order(service_id, direction)
+    if not moved:
+        await query.answer("Ya está en el límite.", show_alert=False)
+        return
+
+    # Refresh the products panel in-place
+    await admin_products(update, context)
 
 
 async def admin_static_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

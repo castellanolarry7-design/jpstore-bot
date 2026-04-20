@@ -56,7 +56,7 @@ from handlers.admin    import (
     admin_stock_receive_creds, admin_stock_add_cancel,
     admin_stock_del_pick, admin_stock_del_view, admin_stock_del_item,
     # Product management
-    admin_products, admin_cleanup,
+    admin_products, admin_cleanup, admin_prod_order_move,
     admin_product_add_start,
     admin_product_name, admin_product_emoji, admin_product_price,
     admin_product_desc_en, admin_product_desc_es,
@@ -568,6 +568,8 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_product_del,     pattern=r"^admin_prod_del_\d+$"))
     # DB product edit menu (non-conv — just shows field buttons)
     app.add_handler(CallbackQueryHandler(admin_prod_edit_menu,  pattern=r"^admin_prod_edit_\d+$"))
+    # Catalog order move (up / down)
+    app.add_handler(CallbackQueryHandler(admin_prod_order_move, pattern=r"^admin_cord_(up|down)_.+$"))
     # Photo management
     app.add_handler(CallbackQueryHandler(admin_static_photos,   pattern=r"^admin_static_photos$"))
     # admin_prod_photo_menu is the entry point of set_photo_conv (registered above)

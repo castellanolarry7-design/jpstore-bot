@@ -197,6 +197,13 @@ async def _create_tables_pg(conn) -> None:
             added_at        TIMESTAMP DEFAULT NOW()
         )
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS catalog_order (
+            service_id  TEXT PRIMARY KEY,
+            sort_order  INTEGER DEFAULT 999,
+            updated_at  TIMESTAMP DEFAULT NOW()
+        )
+    """)
     # Safe ALTER TABLE ADD COLUMN IF NOT EXISTS (PG 9.6+)
     for tbl, col, typedef in [
         ("users",    "credits",              "REAL DEFAULT 0.0"),
@@ -337,6 +344,13 @@ async def _create_tables_sqlite(db) -> None:
             added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS catalog_order (
+            service_id  TEXT PRIMARY KEY,
+            sort_order  INTEGER DEFAULT 999,
+            updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     await db.commit()
     # Safe migrations for existing SQLite DBs
     for tbl, existing_cols_query, col_defs in [
@@ -382,6 +396,7 @@ async def init_db() -> None:
     await refresh_products_cache()
     await refresh_methods_cache()
     await refresh_overrides_cache()
+    await refresh_order_cache()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -493,6 +508,80 @@ def get_static_methods() -> dict:
                 entry["delivery"]["es"] = ovr["delivery_es"]
         result[mid] = entry
     return result
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CATALOG ORDER (custom sort_order for all products)
+# ═════════════════════════════════════════════════════════════════════════════
+
+_order_cache: dict = {}   # service_id → sort_order (int)
+
+
+async def refresh_order_cache() -> None:
+    global _order_cache
+    rows = await _fetch("SELECT service_id, sort_order FROM catalog_order")
+    _order_cache = {r["service_id"]: int(r["sort_order"]) for r in rows}
+
+
+def get_catalog_order() -> dict:
+    """Sync read of catalog order map (service_id → sort_order int)."""
+    return dict(_order_cache)
+
+
+async def set_service_sort_order(service_id: str, order: int) -> None:
+    """Upsert a sort_order for a service_id."""
+    if _USE_PG:
+        await _exec("""
+            INSERT INTO catalog_order (service_id, sort_order)
+            VALUES ($1, $2)
+            ON CONFLICT (service_id) DO UPDATE SET sort_order=$2, updated_at=NOW()
+        """, service_id, order)
+    else:
+        await _exec("""
+            INSERT OR REPLACE INTO catalog_order (service_id, sort_order)
+            VALUES ($1, $2)
+        """, service_id, order)
+    _order_cache[service_id] = order
+
+
+async def move_catalog_order(service_id: str, direction: str) -> bool:
+    """
+    Move service_id one step up or down in the catalog order.
+    Returns True if the swap happened, False if already at boundary.
+    """
+    all_svc = {**get_static_services(), **get_cached_db_products()}
+    all_ids = list(all_svc.keys())
+
+    # Build a complete order map, assigning stable defaults for items not yet in table
+    order_map = dict(_order_cache)
+    for i, sid in enumerate(all_ids):
+        if sid not in order_map:
+            order_map[sid] = i * 10 + 10   # 10, 20, 30 …
+
+    all_ids.sort(key=lambda s: order_map.get(s, 999))
+
+    idx = next((i for i, s in enumerate(all_ids) if s == service_id), -1)
+    if idx == -1:
+        return False
+    if direction == "up"   and idx == 0:
+        return False
+    if direction == "down" and idx == len(all_ids) - 1:
+        return False
+
+    nb_idx = idx - 1 if direction == "up" else idx + 1
+    nb_id  = all_ids[nb_idx]
+
+    my_order = order_map[service_id]
+    nb_order = order_map[nb_id]
+
+    # Ensure values differ so the swap is meaningful
+    if my_order == nb_order:
+        my_order, nb_order = idx * 10 + 10, nb_idx * 10 + 10
+
+    await set_service_sort_order(service_id, nb_order)
+    await set_service_sort_order(nb_id, my_order)
+    await refresh_order_cache()
+    return True
 
 
 async def set_product_override(service_id: str, field: str, value) -> None:

@@ -79,6 +79,13 @@ async def membership_middleware(update: Update, context: ContextTypes.DEFAULT_TY
     if user is None:
         return  # no user context — let it pass
 
+    # ── PRIVATE CHAT ONLY ─────────────────────────────────────────────────────
+    # The bot is added to groups only to verify membership.
+    # Any update that does NOT come from a private chat is silently dropped.
+    chat = update.effective_chat
+    if chat and chat.type != "private":
+        raise ApplicationHandlerStop
+
     user_id = user.id
 
     # Admins are always allowed through — never gate them

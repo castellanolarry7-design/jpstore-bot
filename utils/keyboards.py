@@ -72,14 +72,21 @@ CATALOG_PAGE_SIZE = 10
 def catalog_kb(lang: str = "en", stock_levels: dict = None,
                page: int = 0) -> InlineKeyboardMarkup:
     """
-    Paginated catalog keyboard.
+    Paginated catalog keyboard — sorted by custom catalog_order.
     page=0 is the first page.  Shows CATALOG_PAGE_SIZE items per page.
+    Pagination row is a compact 3-button strip: ◀️ | X/Y | ▶️
     """
     stock_levels = stock_levels or {}
-    all_services = list({**db.get_static_services(), **db.get_cached_db_products()}.values())
-    total        = len(all_services)
-    start        = page * CATALOG_PAGE_SIZE
-    page_items   = all_services[start: start + CATALOG_PAGE_SIZE]
+
+    # Sort services by custom order (unknowns go to end)
+    order_map    = db.get_catalog_order()
+    all_services = sorted(
+        {**db.get_static_services(), **db.get_cached_db_products()}.values(),
+        key=lambda s: order_map.get(s["id"], 999)
+    )
+    total      = len(all_services)
+    start      = page * CATALOG_PAGE_SIZE
+    page_items = all_services[start: start + CATALOG_PAGE_SIZE]
 
     buttons = []
     for svc in page_items:
@@ -92,28 +99,16 @@ def catalog_kb(lang: str = "en", stock_levels: dict = None,
             )
         ])
 
-    # Pagination row
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(
-            "◀️ " + ("Anterior" if lang == "es" else "Previous"),
-            callback_data=f"catalog_page_{page - 1}"
-        ))
-    if start + CATALOG_PAGE_SIZE < total:
-        nav.append(InlineKeyboardButton(
-            ("Siguiente" if lang == "es" else "Next") + " ▶️",
-            callback_data=f"catalog_page_{page + 1}"
-        ))
-    if nav:
-        buttons.append(nav)
-
-    # Page counter when there is more than one page
+    # Compact 3-button pagination strip (only when there is more than one page)
     if total > CATALOG_PAGE_SIZE:
         total_pages = (total + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE
-        buttons.append([InlineKeyboardButton(
-            f"📄 {page + 1}/{total_pages}",
-            callback_data="noop"
-        )])
+        prev_cb = f"catalog_page_{page - 1}" if page > 0          else "noop"
+        next_cb = f"catalog_page_{page + 1}" if page + 1 < total_pages else "noop"
+        buttons.append([
+            InlineKeyboardButton("◀️",              callback_data=prev_cb),
+            InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"),
+            InlineKeyboardButton("▶️",              callback_data=next_cb),
+        ])
 
     buttons.append([InlineKeyboardButton(t("btn_home", lang), callback_data="home")])
     return InlineKeyboardMarkup(buttons)
