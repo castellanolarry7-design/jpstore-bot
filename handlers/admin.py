@@ -42,6 +42,10 @@ WAITING_WELCOME_PHOTO = 49
 WAITING_PROD_EDIT_VALUE   = 60   # new value for a DB product field
 WAITING_STATIC_EDIT_VALUE = 61   # new value for a static product/method override
 
+# Direct message to user states
+WAITING_DM_TARGET = 80   # admin types @username or user ID
+WAITING_DM_TEXT   = 81   # admin types the message to send
+
 # Method management states
 WAITING_METHOD_NAME        = 50
 WAITING_METHOD_EMOJI       = 51
@@ -101,6 +105,7 @@ def _admin_main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🛍️ Productos",           callback_data="admin_products"),
          InlineKeyboardButton("📘 Métodos",             callback_data="admin_methods")],
         [InlineKeyboardButton("🎭 Simular entrega",     callback_data="admin_sim_pick")],
+        [InlineKeyboardButton("✉️ Mensaje directo",     callback_data="admin_dm_start")],
         [InlineKeyboardButton("🧹 Limpiar pedidos viejos", callback_data="admin_cleanup")],
     ])
 
@@ -2337,6 +2342,130 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         icon = _stock_icon(row["available"])
         lines.append(f"{icon} <b>{_svc_name(row['service_id'])}</b> — {row['available']} disp.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    return ConversationHandler.END
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MENSAJE DIRECTO A USUARIO (solo admin)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def admin_dm_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Admin clicks '✉️ Mensaje directo' — ask for target user."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        await query.answer("🔐 Sin permisos.", show_alert=True)
+        return ConversationHandler.END
+
+    await query.message.reply_text(
+        "✉️ <b>Mensaje directo a usuario</b>\n\n"
+        "Escribe el <b>@username</b> o el <b>ID numérico</b> del usuario al que quieres escribir.\n\n"
+        "<i>/cancelar para abortar</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_DM_TARGET
+
+
+async def admin_dm_receive_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Admin types @username or numeric ID — look up the user."""
+    raw = update.message.text.strip()
+
+    # Determine target user_id
+    target_id: int | None = None
+    target_user: dict | None = None
+
+    if raw.lstrip("@").isdigit():
+        # Pure numeric (with or without @)
+        target_id = int(raw.lstrip("@"))
+        target_user = await db.get_user(target_id)
+    else:
+        # @username lookup
+        target_user = await db.get_user_by_username(raw)
+        if target_user:
+            target_id = target_user["user_id"]
+
+    if not target_user:
+        await update.message.reply_text(
+            "❌ <b>Usuario no encontrado.</b>\n\n"
+            "Asegúrate de que el usuario haya iniciado el bot y que el @username o ID sea correcto.\n"
+            "Intenta de nuevo o usa /cancelar para abortar.",
+            parse_mode="HTML"
+        )
+        return WAITING_DM_TARGET  # let admin retry
+
+    # Store target info
+    context.user_data["dm_target_id"] = target_id
+    context.user_data["dm_target_name"] = target_user.get("first_name", str(target_id))
+    ustr = f"@{target_user['username']}" if target_user.get("username") else f"ID {target_id}"
+
+    await update.message.reply_text(
+        f"👤 <b>Usuario encontrado:</b> {target_user.get('first_name', '')} ({ustr})\n\n"
+        "✍️ Ahora escribe el <b>mensaje</b> que quieres enviarle.\n"
+        "Puedes usar HTML: <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;code&gt;</code>\n\n"
+        "<i>/cancelar para abortar</i>",
+        parse_mode="HTML"
+    )
+    return WAITING_DM_TEXT
+
+
+async def admin_dm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Admin types the message — send it to the target user."""
+    target_id   = context.user_data.get("dm_target_id")
+    target_name = context.user_data.get("dm_target_name", str(target_id))
+
+    if not target_id:
+        await update.message.reply_text("❌ Sesión expirada. Empieza de nuevo.")
+        return ConversationHandler.END
+
+    message_text = update.message.text.strip()
+
+    try:
+        await update.effective_chat.send_message(
+            chat_id=target_id,
+            text=(
+                f"📩 <b>Mensaje del administrador</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{message_text}"
+            ),
+            parse_mode="HTML"
+        )
+        await update.message.reply_text(
+            f"✅ <b>Mensaje enviado correctamente</b>\n"
+            f"👤 Para: {target_name} (<code>{target_id}</code>)",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+            ])
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ <b>No se pudo enviar el mensaje.</b>\n\n"
+            f"El usuario puede haber bloqueado el bot.\n"
+            f"Error: <code>{e}</code>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+            ])
+        )
+
+    context.user_data.pop("dm_target_id", None)
+    context.user_data.pop("dm_target_name", None)
+    return ConversationHandler.END
+
+
+async def admin_dm_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancel the DM flow."""
+    context.user_data.pop("dm_target_id", None)
+    context.user_data.pop("dm_target_name", None)
+    if update.message:
+        await update.message.reply_text(
+            "❌ Mensaje cancelado.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ Panel admin", callback_data="admin_panel")]
+            ])
+        )
+    elif update.callback_query:
+        await update.callback_query.answer("Cancelado.")
     return ConversationHandler.END
 
 

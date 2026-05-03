@@ -1052,6 +1052,14 @@ async def get_user_by_referral_code(code: str) -> dict | None:
     return await _fetchrow("SELECT * FROM users WHERE referral_code = $1", code)
 
 
+async def get_user_by_username(username: str) -> dict | None:
+    """Lookup a user by their Telegram @username (case-insensitive, with or without @)."""
+    clean = username.lstrip("@").lower()
+    return await _fetchrow(
+        "SELECT * FROM users WHERE LOWER(username) = $1", clean
+    )
+
+
 async def record_referral(referrer_id: int, referred_id: int) -> None:
     if _USE_PG:
         await _exec("""

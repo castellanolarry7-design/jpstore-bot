@@ -91,6 +91,8 @@ from handlers.admin    import (
     admin_method_edit_price_start, admin_method_edit_price_receive,
     # Legacy /addstock /stock commands
     cmd_addstock, cmd_stock,
+    # Direct message to user
+    admin_dm_start, admin_dm_receive_target, admin_dm_send, admin_dm_cancel,
     # States
     WAITING_ADMIN_PASSWORD, WAITING_DELIVERY_INFO,
     WAITING_BROADCAST_MSG, WAITING_STOCK_ADD_CREDS,
@@ -103,6 +105,7 @@ from handlers.admin    import (
     WAITING_METHOD_DESC_EN, WAITING_METHOD_DESC_ES,
     WAITING_METHOD_DELIVERY_EN, WAITING_METHOD_DELIVERY_ES,
     WAITING_METHOD_EDIT_PRICE,
+    WAITING_DM_TARGET, WAITING_DM_TEXT,
 )
 from handlers.stats import cmd_estadisticas
 from handlers.membership_middleware import membership_middleware
@@ -287,6 +290,35 @@ def build_application() -> Application:
         allow_reentry=True,
     )
     app.add_handler(topup_binance_conv)
+
+    # ── Direct Message to specific user (admin only) ──────────────────────────
+    dm_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_dm_start, pattern=r"^admin_dm_start$")],
+        states={
+            WAITING_DM_TARGET: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_dm_receive_target),
+                CommandHandler("cancel",   admin_dm_cancel),
+                CommandHandler("cancelar", admin_dm_cancel),
+                CallbackQueryHandler(admin_dm_cancel,  pattern=r"^admin_dm_cancel$"),
+                CallbackQueryHandler(admin_panel,       pattern=r"^admin_panel$"),
+            ],
+            WAITING_DM_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_dm_send),
+                CommandHandler("cancel",   admin_dm_cancel),
+                CommandHandler("cancelar", admin_dm_cancel),
+                CallbackQueryHandler(admin_dm_cancel,  pattern=r"^admin_dm_cancel$"),
+                CallbackQueryHandler(admin_panel,       pattern=r"^admin_panel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",   admin_dm_cancel),
+            CommandHandler("cancelar", admin_dm_cancel),
+            CallbackQueryHandler(admin_dm_cancel, pattern=r"^admin_dm_cancel$"),
+            CallbackQueryHandler(admin_panel,      pattern=r"^admin_panel$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(dm_conv)
 
     # ── Broadcast ─────────────────────────────────────────────────────────────
     broadcast_conv = ConversationHandler(
