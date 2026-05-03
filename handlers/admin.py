@@ -295,6 +295,15 @@ async def admin_pending_orders(update: Update, context: ContextTypes.DEFAULT_TYP
             f"🧾 Comprobante: {'✅' if o.get('payment_proof') else '❌'}\n"
             f"📅 {o['created_at']}"
         )
+        act_info = await db.get_activation_info(o["order_id"])
+        if act_info:
+            text += (
+                f"\n🔑 <b>Credenciales:</b>\n"
+                f"   📧 <code>{act_info.get('email','')}</code>\n"
+                f"   🔒 <code>{act_info.get('password','')}</code>\n"
+            )
+            if act_info.get("twofa"):
+                text += f"   🔐 2FA: <code>{act_info['twofa']}</code>\n"
         await query.message.reply_text(
             text, parse_mode="HTML",
             reply_markup=_admin_order_kb(o["order_id"], o["user_id"])
@@ -819,6 +828,12 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 InlineKeyboardButton(f"{photo_icon} Foto", callback_data=f"admin_prod_photo_{sid}"),
                 InlineKeyboardButton("🗑️",               callback_data=f"admin_prod_del_{p['id']}"),
             ])
+            # Row 3: activation toggle
+            act_icon = "🔑" if svc.get("activation_required") else "🔓"
+            act_label = f"{act_icon} Activación {'ON' if svc.get('activation_required') else 'OFF'}"
+            prod_buttons.append([
+                InlineKeyboardButton(act_label, callback_data=f"admin_toggle_act_{sid}"),
+            ])
         else:
             prod_buttons.append([
                 InlineKeyboardButton("✏️ Editar",  callback_data=f"admin_sedit_{sid}"),
@@ -831,6 +846,26 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     ])
 
     await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+async def admin_toggle_activation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback: admin_toggle_act_<service_id> — toggle activation_required flag."""
+    query = update.callback_query
+    await query.answer()
+    if not is_admin(query.from_user.id) or not is_authed(context):
+        return
+
+    service_id   = query.data[len("admin_toggle_act_"):]
+    all_s        = {**db.get_static_services(), **db.get_cached_db_products()}
+    svc          = all_s.get(service_id, {})
+    current      = svc.get("activation_required", False)
+    new_val      = not current
+
+    await db.set_activation_required(service_id, new_val)
+
+    state = "activada 🔑" if new_val else "desactivada 🔓"
+    await query.answer(f"Activación {state} para {svc.get('name', service_id)}", show_alert=True)
+    await admin_products(update, context)
 
 
 async def admin_prod_order_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2213,28 +2248,38 @@ async def admin_sim_preview(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer("Servicio no encontrado.", show_alert=True)
         return
 
-    from utils.delivery import build_delivery_message, _format_credential
+    from utils.delivery import build_delivery_message
 
-    # Detect if this service typically delivers links (check stock hint or name)
-    name_lower = svc.get("name", "").lower()
+    # Use the admin's own language setting — same way delivery.py uses the buyer's lang
+    lang = await db.get_user_lang(query.from_user.id)
+
+    # Detect if this service typically delivers links (check name keywords)
+    name_lower   = svc.get("name", "").lower()
     is_link_type = any(k in name_lower for k in ("18m", "18 mes", "redeem", "link", "url"))
     sample_content = _SAMPLE_CREDS["link"] if is_link_type else _SAMPLE_CREDS["default"]
 
-    fake_items = [{"content": sample_content}]
+    fake_items  = [{"content": sample_content}]
     preview_msg = build_delivery_message(
-        emoji   = svc["emoji"],
-        name    = svc["name"],
-        order_id= "PREVIEW",
-        lang    = "es",
-        items   = fake_items,
+        emoji    = svc["emoji"],
+        name     = svc["name"],
+        order_id = "PREVIEW",
+        lang     = lang,
+        items    = fake_items,
     )
 
-    # Header note only visible to admin
-    header = (
-        "🎭 <b>VISTA PREVIA — así verá el usuario su entrega</b>\n"
-        "<i>(Credencial de muestra — no es real)</i>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
+    # Header note visible only to admin (not part of the real delivery)
+    if lang == "es":
+        header = (
+            "🎭 <b>VISTA PREVIA — así verá el usuario su entrega</b>\n"
+            "<i>(Credencial de muestra — no es real)</i>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
+    else:
+        header = (
+            "🎭 <b>PREVIEW — this is what the user will receive</b>\n"
+            "<i>(Sample credential — not real)</i>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+        )
 
     await query.message.reply_text(
         header + preview_msg,

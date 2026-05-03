@@ -107,15 +107,16 @@ async def _create_tables_pg(conn) -> None:
     """)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS product_overrides (
-            service_id   TEXT PRIMARY KEY,
-            price        REAL    DEFAULT NULL,
-            name         TEXT    DEFAULT NULL,
-            emoji        TEXT    DEFAULT NULL,
-            desc_en      TEXT    DEFAULT NULL,
-            desc_es      TEXT    DEFAULT NULL,
-            delivery_en  TEXT    DEFAULT NULL,
-            delivery_es  TEXT    DEFAULT NULL,
-            updated_at   TIMESTAMP DEFAULT NOW()
+            service_id              TEXT PRIMARY KEY,
+            price                   REAL    DEFAULT NULL,
+            name                    TEXT    DEFAULT NULL,
+            emoji                   TEXT    DEFAULT NULL,
+            desc_en                 TEXT    DEFAULT NULL,
+            desc_es                 TEXT    DEFAULT NULL,
+            delivery_en             TEXT    DEFAULT NULL,
+            delivery_es             TEXT    DEFAULT NULL,
+            activation_required     INTEGER DEFAULT NULL,
+            updated_at              TIMESTAMP DEFAULT NOW()
         )
     """)
     await conn.execute("""
@@ -217,6 +218,8 @@ async def _create_tables_pg(conn) -> None:
         ("orders",   "payer_binance_id",     "TEXT"),
         ("orders",   "instruction_msg_id",   "BIGINT"),
         ("orders",   "instruction_chat_id",  "BIGINT"),
+        ("orders",   "activation_info",      "TEXT DEFAULT NULL"),
+        ("products", "activation_required",  "INTEGER DEFAULT 0"),
         ("stock",    "label",                "TEXT"),
         ("products", "photo_file_id",        "TEXT DEFAULT NULL"),
     ]:
@@ -254,15 +257,16 @@ async def _create_tables_sqlite(db) -> None:
     """)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS product_overrides (
-            service_id   TEXT PRIMARY KEY,
-            price        REAL    DEFAULT NULL,
-            name         TEXT    DEFAULT NULL,
-            emoji        TEXT    DEFAULT NULL,
-            desc_en      TEXT    DEFAULT NULL,
-            desc_es      TEXT    DEFAULT NULL,
-            delivery_en  TEXT    DEFAULT NULL,
-            delivery_es  TEXT    DEFAULT NULL,
-            updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            service_id              TEXT PRIMARY KEY,
+            price                   REAL    DEFAULT NULL,
+            name                    TEXT    DEFAULT NULL,
+            emoji                   TEXT    DEFAULT NULL,
+            desc_en                 TEXT    DEFAULT NULL,
+            desc_es                 TEXT    DEFAULT NULL,
+            delivery_en             TEXT    DEFAULT NULL,
+            delivery_es             TEXT    DEFAULT NULL,
+            activation_required     INTEGER DEFAULT NULL,
+            updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     await db.execute("""
@@ -369,12 +373,14 @@ async def _create_tables_sqlite(db) -> None:
             "payer_binance_id": "ALTER TABLE orders ADD COLUMN payer_binance_id TEXT",
             "instruction_msg_id": "ALTER TABLE orders ADD COLUMN instruction_msg_id INTEGER",
             "instruction_chat_id": "ALTER TABLE orders ADD COLUMN instruction_chat_id INTEGER",
+            "activation_info": "ALTER TABLE orders ADD COLUMN activation_info TEXT DEFAULT NULL",
         }),
         ("stock", "PRAGMA table_info(stock)", {
             "label": "ALTER TABLE stock ADD COLUMN label TEXT",
         }),
         ("products", "PRAGMA table_info(products)", {
             "photo_file_id": "ALTER TABLE products ADD COLUMN photo_file_id TEXT DEFAULT NULL",
+            "activation_required": "ALTER TABLE products ADD COLUMN activation_required INTEGER DEFAULT 0",
         }),
     ]:
         async with db.execute(existing_cols_query) as cur:
@@ -426,6 +432,7 @@ async def refresh_products_cache() -> None:
                 "es": r.get("delivery_es") or "Entrega inmediata",
             },
             "photo_file_id": r.get("photo_file_id") or None,
+            "activation_required": bool(r.get("activation_required", 0)),
             "_db_id": r["id"],   # kept for deletion
         }
 
@@ -474,6 +481,8 @@ def get_static_services() -> dict:
                 entry["delivery"]["en"] = ovr["delivery_en"]
             if ovr.get("delivery_es"):
                 entry["delivery"]["es"] = ovr["delivery_es"]
+        if ovr.get("activation_required") is not None:
+            entry["activation_required"] = bool(ovr["activation_required"])
         result[sid] = entry
     return result
 
@@ -1091,6 +1100,67 @@ async def add_referral_credit(referrer_id: int, buyer_id: int) -> None:
         "UPDATE referrals SET credited=1 WHERE referrer_id=$1 AND referred_id=$2",
         referrer_id, buyer_id
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ACTIVATION FLOW (for products requiring account credentials)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def is_activation_required(service_id: str) -> bool:
+    """Sync check — returns True if this service needs account credentials before delivery."""
+    # Check DB products cache
+    prod = _products_cache.get(service_id)
+    if prod and prod.get("activation_required"):
+        return True
+    # Check static service overrides
+    ovr = _overrides_cache.get(service_id, {})
+    if ovr.get("activation_required"):
+        return True
+    return False
+
+
+async def save_activation_info(order_id: int, email: str, password: str, twofa: str = "") -> None:
+    """Store account credentials for an activation-type order."""
+    import json
+    info = json.dumps({"email": email, "password": password, "twofa": twofa}, ensure_ascii=False)
+    await _exec("UPDATE orders SET activation_info=$1 WHERE order_id=$2", info, order_id)
+
+
+async def get_activation_info(order_id: int) -> dict | None:
+    """Return parsed activation_info dict for an order, or None."""
+    import json
+    row = await _fetchrow("SELECT activation_info FROM orders WHERE order_id=$1", order_id)
+    if not row or not row.get("activation_info"):
+        return None
+    try:
+        return json.loads(row["activation_info"])
+    except Exception:
+        return None
+
+
+async def set_activation_required(service_id: str, required: bool) -> None:
+    """Toggle activation_required for a product (DB product or static override)."""
+    prod = _products_cache.get(service_id)
+    if prod:
+        # DB product — update products table
+        val = 1 if required else 0
+        await _exec("UPDATE products SET activation_required=$1 WHERE service_id=$2", val, service_id)
+        await refresh_products_cache()
+    else:
+        # Static product — use override
+        val = 1 if required else 0
+        if _USE_PG:
+            await _exec("""
+                INSERT INTO product_overrides (service_id, activation_required)
+                VALUES ($1, $2)
+                ON CONFLICT (service_id) DO UPDATE SET activation_required=$2, updated_at=NOW()
+            """, service_id, val)
+        else:
+            await _exec("""
+                INSERT OR IGNORE INTO product_overrides (service_id) VALUES ($1)
+            """, service_id)
+            await _exec("UPDATE product_overrides SET activation_required=$1 WHERE service_id=$2", val, service_id)
+        await refresh_overrides_cache()
 
 
 # ═════════════════════════════════════════════════════════════════════════════

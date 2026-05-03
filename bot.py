@@ -40,6 +40,11 @@ from handlers.balance  import (
     ask_custom_topup, receive_custom_topup,
     WAITING_TOPUP_PAYER_ID, WAITING_CUSTOM_TOPUP,
 )
+from handlers.activation import (
+    activation_start, receive_act_email, receive_act_password,
+    receive_act_2fa, skip_act_2fa, cancel_activation,
+    WAITING_ACT_EMAIL, WAITING_ACT_PASSWORD, WAITING_ACT_2FA,
+)
 from handlers.admin    import (
     # Auth
     admin_entry, admin_check_password,
@@ -56,7 +61,7 @@ from handlers.admin    import (
     admin_stock_receive_creds, admin_stock_add_cancel,
     admin_stock_del_pick, admin_stock_del_view, admin_stock_del_item,
     # Product management
-    admin_products, admin_cleanup, admin_prod_order_move,
+    admin_products, admin_cleanup, admin_prod_order_move, admin_toggle_activation,
     admin_product_add_start,
     admin_product_name, admin_product_emoji, admin_product_price,
     admin_product_desc_en, admin_product_desc_es,
@@ -210,6 +215,35 @@ def build_application() -> Application:
         allow_reentry=True,
     )
     app.add_handler(proof_conv)
+
+    # ── Account activation (credentials collection for activation-required products) ───
+    activation_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(activation_start, pattern=r"^act_start_\d+$"),
+        ],
+        states={
+            WAITING_ACT_EMAIL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_act_email),
+                CallbackQueryHandler(cancel_activation, pattern=r"^act_cancel$"),
+            ],
+            WAITING_ACT_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_act_password),
+                CallbackQueryHandler(cancel_activation, pattern=r"^act_cancel$"),
+            ],
+            WAITING_ACT_2FA: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_act_2fa),
+                CallbackQueryHandler(skip_act_2fa,       pattern=r"^act_no2fa$"),
+                CallbackQueryHandler(cancel_activation,  pattern=r"^act_cancel$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel",   cancel_activation),
+            CommandHandler("cancelar", cancel_activation),
+            CallbackQueryHandler(cancel_activation, pattern=r"^act_cancel$"),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(activation_conv)
 
     # ── Admin manual deliver ──────────────────────────────────────────────────
     deliver_conv = ConversationHandler(
@@ -572,6 +606,8 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(admin_prod_edit_menu,  pattern=r"^admin_prod_edit_\d+$"))
     # Catalog order move (up / down)
     app.add_handler(CallbackQueryHandler(admin_prod_order_move, pattern=r"^admin_cord_(up|down)_.+$"))
+    # Activation toggle
+    app.add_handler(CallbackQueryHandler(admin_toggle_activation, pattern=r"^admin_toggle_act_.+$"))
     # Photo management
     app.add_handler(CallbackQueryHandler(admin_static_photos,   pattern=r"^admin_static_photos$"))
     # admin_prod_photo_menu is the entry point of set_photo_conv (registered above)

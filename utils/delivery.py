@@ -94,6 +94,38 @@ async def auto_deliver(
     name  = svc.get("name", service_id)
     emoji = svc.get("emoji", "📦")
 
+    # ── Activation-required products: skip stock, request account credentials ──
+    if db.is_activation_required(service_id):
+        lang_label = "es" if lang == "es" else "en"
+        if lang == "es":
+            msg = (
+                f"✅ <b>¡Pago confirmado!</b>\n\n"
+                f"{emoji} <b>{name}</b>\n"
+                f"🆔 Pedido #{order_id}\n\n"
+                "Para activar tu servicio necesitamos los datos de tu cuenta.\n"
+                "Pulsa el botón de abajo para proporcionarlos de forma segura. 🔒"
+            )
+        else:
+            msg = (
+                f"✅ <b>Payment confirmed!</b>\n\n"
+                f"{emoji} <b>{name}</b>\n"
+                f"🆔 Order #{order_id}\n\n"
+                "To activate your service we need your account credentials.\n"
+                "Tap the button below to provide them securely. 🔒"
+            )
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "🔑 Proporcionar datos / Provide credentials",
+                callback_data=f"act_start_{order_id}"
+            )
+        ]])
+        try:
+            await bot.send_message(chat_id=user_id, text=msg, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            print(f"[Activation] Could not send credential request to {user_id}: {e}")
+        return True   # handled — no stock needed
+
     items = await db.take_stock_items_multi(service_id, order_id, qty)
 
     if items:

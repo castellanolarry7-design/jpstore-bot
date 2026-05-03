@@ -45,7 +45,7 @@ REFERRAL_REWARD: float = 0.50   # USD credit per successful referral
 # ── Store info ────────────────────────────────────────────
 STORE_NAME        = "🛒 ReseliBot"
 STORE_DESCRIPTION = "Your premium AI services & methods store"
-SUPPORT_USERNAME  = "@iZenNode"
+SUPPORT_USERNAME  = "@xpsolidity"
 
 # ── Membership gate ───────────────────────────────────────────────────────────
 # The bot must be admin in both to check members. Set to "" to disable.
