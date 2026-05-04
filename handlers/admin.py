@@ -2420,7 +2420,7 @@ async def admin_dm_send(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     message_text = update.message.text.strip()
 
     try:
-        await update.effective_chat.send_message(
+        await context.bot.send_message(
             chat_id=target_id,
             text=(
                 f"📩 <b>Mensaje del administrador</b>\n"
